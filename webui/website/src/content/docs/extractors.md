@@ -64,6 +64,45 @@ description: 'Understand and configure the built in content handlers used for in
       description: 'Additional domains to match this extractor. They should take the form "domain.tld", e.g. "vimeo.com". Check the yt-dlp repository for a full list of supported sites.'
     }
   ];
+
+  const ytVideoDownloaderOptions = [
+    {
+      name: 'binary',
+      type: 'string',
+      defaultValue: 'yt_downloader',
+      description: 'Executable path or command name resolved through PATH.',
+    },
+    {
+      name: 'output_dir',
+      type: 'string',
+      defaultValue: '~/Videos/Hister/YouTube',
+      description: 'Directory where downloaded video and audio files are stored.',
+    },
+    {
+      name: 'timeout',
+      type: 'int',
+      defaultValue: '1800',
+      description: 'Maximum time in seconds for downloading both video and audio files.'
+    },
+    {
+      name: 'max_concurrent_jobs',
+      type: 'int',
+      defaultValue: '2',
+      description: 'Maximum number of downloader jobs running at once. Set to zero for no limit.',
+    },
+    {
+      name: 'backend',
+      type: 'string',
+      defaultValue: 'auto',
+      description: 'Downloader backend: auto, yt-dlp, or youtube-dl.',
+    },
+    {
+      name: 'transcribe',
+      type: 'boolean',
+      defaultValue: 'false',
+      description: 'Download available English manual or automatic captions as VTT files. This does not run speech recognition or add captions to Hister indexed text.',
+    },
+  ];
 </script>
 
 Extractors are the components responsible for turning raw HTML or file content
@@ -118,10 +157,10 @@ extractor is omitted from the config, its built-in defaults apply.
 
 Controls whether the extractor participates in the chain.
 
-| Value   | Effect                                                            |
-| ------- | ----------------------------------------------------------------- |
-| `true`  | Extractor is active. This is the default except for `ytdlp`.      |
-| `false` | Extractor is skipped for automatic indexing and preview selection |
+| Value   | Effect                                                                                                       |
+| ------- | ------------------------------------------------------------------------------------------------------------ |
+| `true`  | Extractor is active. The external-tool extractors `ytdlp` and `yt_video_downloader` are disabled by default. |
+| `false` | Extractor is skipped for automatic indexing and preview selection                                            |
 
 ### `options`
 
@@ -346,6 +385,62 @@ application shell when the rendered block content is missing.
 
 **Matches:** nonroot pages on `notion.so`, `www.notion.so`, and any
 `*.notion.site` domain.
+
+### `yt_video_downloader`
+
+A local download enricher and preview renderer for this Hister checkout. It
+invokes the configured `yt_downloader` executable in video and audio-only
+modes. The audio mode does not promise a particular container or stream
+composition; the downloader may use its documented audio-bearing media fallback.
+By default Hister does not request captions. Set `transcribe: true` to request
+available English captions as VTT sidecars; this does not run speech recognition
+or add captions to Hister's indexed text. The enricher leaves the source
+document's searchable content intact and records validated media file URIs in
+its metadata. Its name appears in the preview extractor menu; selecting it
+shows the recorded video-mode and audio-mode files on the original YouTube
+result, without creating separate search results. The normal content extractor
+(such as `ytdlp`) continues to provide the usual preview. The media output
+directory does not need to be configured under `indexer.directories`.
+
+Each invocation gets a unique job ID and media subdirectory under `output_dir`.
+Hister accepts paths only from the invocation's completed JSON result manifest;
+it does not guess from downloader logs or scan the output directory. The
+configured executable must implement the named-job flags and **result JSON
+schema v1** (`--job-id`, `--output-root`, `--artifacts-root`, and
+`--result-json`). Older or incompatible downloader builds fail enrichment with
+an upgrade hint, while Hister's normal extraction chain continues. Successful
+media and failed-attempt files are retained; Hister removes the temporary
+result manifest but does not automatically delete media directories. Per-job
+artifact directories are retained under the user's local cache. Re-index a
+YouTube page explicitly to replace old or incorrect saved references.
+
+The extractor is **disabled by default**. Enable it only after installing a
+compatible `yt_downloader` build. This extractor is local to this custom Hister
+build and is not included in Hister's published binary. Cancellation terminates
+the downloader process group on Linux and macOS; other platforms currently stop
+the downloader process itself, but may not stop its child processes.
+
+**Matches:** supported video URLs on `youtube.com`, `youtube-nocookie.com`, and
+`youtu.be`, including watch, shorts, live, embed, and short-link forms. Playlist,
+channel, and other pages without an unambiguous video ID are not downloaded.
+
+#### Options
+
+<ConfigReference items={ytVideoDownloaderOptions} />
+
+#### Example configuration
+
+```yaml
+extractors:
+  yt_video_downloader:
+    enable: true
+    options:
+      binary: yt_downloader
+      output_dir: ~/Videos/Hister/YouTube
+      timeout: 1800
+      backend: auto
+      transcribe: false # Set true to download available captions as VTT files.
+```
 
 ### `ytdlp`
 

@@ -27,6 +27,7 @@ import (
 	"github.com/asciimoo/hister/server/extractor/extractors/stackexchange"
 	"github.com/asciimoo/hister/server/extractor/extractors/twitter"
 	"github.com/asciimoo/hister/server/extractor/extractors/wikipedia"
+	ytvideodownloader "github.com/asciimoo/hister/server/extractor/extractors/yt_video_downloader"
 	"github.com/asciimoo/hister/server/extractor/extractors/ytdlp"
 	"github.com/asciimoo/hister/server/extractor/sdk"
 )
@@ -74,6 +75,7 @@ func DefaultExtractors() []Extractor {
 		&bluesky.BlueskyExtractor{},
 		&twitter.TwitterExtractor{},
 		&notion.NotionExtractor{},
+		&ytvideodownloader.YTVideoDownloader{},
 		&ytdlp.YtdlpExtractor{},
 		&chatgpt.ChatGPTExtractor{},
 		&readabilityExtractor{},

@@ -71,6 +71,22 @@ cd hister
 ./manage.sh build
 ```
 
+### `yt_video_downloader` extractor
+
+The optional `yt_video_downloader` extractor invokes the separately installed
+`yt_downloader` executable for video and audio-only downloads. It leaves indexed
+content unchanged and can download caption sidecars when
+`extractors.yt_video_downloader.options.transcribe` is enabled. Selecting it in
+the preview extractor menu shows media links on the original YouTube result.
+See [Extractors](webui/website/src/content/docs/extractors.md) for setup and
+configuration. The extractor is disabled by default.
+
+To build and run this checkout with Nix:
+
+```bash
+nix run .#hister -- listen
+```
+
 To work on the web app with hot reload and automatic Go rebuilds:
 
 ```bash

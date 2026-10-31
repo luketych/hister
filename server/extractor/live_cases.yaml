@@ -329,6 +329,13 @@ cases:
         - Assistant
       min_preview_length: 100
 
+  - name: yt_video_downloader_youtube_match
+    url: https://www.youtube.com/watch?v=jNQXAC9IVRw
+    fetch: false
+    extractor: yt_video_downloader
+    extract_decision: fallback
+    run_chain: false
+
   - name: ytdlp_archive_big_buck_bunny
     url: https://archive.org/details/BigBuckBunny_328
     fetch: false

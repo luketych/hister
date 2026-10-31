@@ -1020,6 +1020,19 @@ func init() {
 			},
 		},
 		{
+			Name:         "YouTube media",
+			Path:         "/api/yt_video_downloader/media",
+			Method:       GET,
+			CSRFRequired: false,
+			Public:       true,
+			Handler:      serveYTVideoDownloaderMedia,
+			Description:  "Stream a downloaded YouTube media file associated with an indexed source document",
+			Args: []*EndpointArg{
+				{Name: "document_id", Type: "string", Required: true, Description: "ID of the indexed YouTube source document"},
+				{Name: "uri", Type: "string", Required: true, Description: "Media URI recorded on the source document"},
+			},
+		},
+		{
 			Name:         "Batch",
 			Path:         "/api/batch",
 			Method:       POST,

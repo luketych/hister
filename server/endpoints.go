@@ -29,6 +29,7 @@ import (
 	"github.com/asciimoo/hister/files"
 	"github.com/asciimoo/hister/server/document"
 	"github.com/asciimoo/hister/server/extractor"
+	ytvideodownloader "github.com/asciimoo/hister/server/extractor/extractors/yt_video_downloader"
 	"github.com/asciimoo/hister/server/extractor/sdk"
 	"github.com/asciimoo/hister/server/indexer"
 	"github.com/asciimoo/hister/server/indexer/querybuilder"
@@ -1686,6 +1687,64 @@ func serveFile(c *webContext) {
 	if _, err := c.Response.Write(content); err != nil {
 		log.Warn().Err(err).Msg("failed to write file response")
 	}
+}
+
+func serveYTVideoDownloaderMedia(c *webContext) {
+	documentID := c.Request.URL.Query().Get("document_id")
+	uri := c.Request.URL.Query().Get("uri")
+	if documentID == "" || uri == "" {
+		http.Error(c.Response, "missing document_id or uri parameter", http.StatusBadRequest)
+		return
+	}
+	doc := c.Indexer.GetByDocID(documentID)
+	if doc == nil || document.GetDocID(doc.UserID, doc.URL) != documentID || (doc.UserID != 0 && doc.UserID != c.UserID) {
+		http.Error(c.Response, "media file not found", http.StatusNotFound)
+		return
+	}
+	if !(&ytvideodownloader.YTVideoDownloader{}).Match(doc) {
+		http.Error(c.Response, "media file not found", http.StatusNotFound)
+		return
+	}
+
+	outputDir := ""
+	if configured, ok := c.Config.Extractors["yt_video_downloader"]; ok && configured != nil {
+		outputDir, _ = configured.Options["output_dir"].(string)
+	}
+	filePath, err := ytvideodownloader.ResolveMediaFile(doc, uri, outputDir)
+	if err != nil {
+		http.Error(c.Response, "media file not found", http.StatusNotFound)
+		return
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		http.Error(c.Response, "media file not found", http.StatusNotFound)
+		return
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Warn().Err(err).Str("path", filePath).Msg("failed to close downloaded media file")
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		http.Error(c.Response, "media file not found", http.StatusNotFound)
+		return
+	}
+
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(filePath)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	c.Response.Header().Set("Cache-Control", "no-store")
+	c.Response.Header().Set("Content-Type", contentType)
+	c.Response.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": filepath.Base(filePath)}))
+	c.Response.Header().Set("X-Content-Type-Options", "nosniff")
+	// Browsers implement top-level media URLs with an internal media document.
+	// A sandboxed CSP blocks that player, and default-src alone blocks its
+	// same-origin media request, so explicitly allow media without relaxing
+	// other resource types.
+	c.Response.Header().Set("Content-Security-Policy", "default-src 'none'; media-src 'self'")
+	http.ServeContent(c.Response, c.Request, filepath.Base(filePath), info.ModTime(), file)
 }
 
 func authorizedFilePath(c *webContext, id string, doc *document.Document) (string, *config.Directory, bool) {
