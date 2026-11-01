@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <script lang="ts">
   import VideoPreview from './VideoPreview.svelte';
+  import MediaPreview from './MediaPreview.svelte';
+  import { parseMediaStatus, type MediaStatus } from '#lib/media-preview.js';
   import IssuePreview from './IssuePreview.svelte';
   import { parseIssuePreview, type IssuePreviewData } from '#lib/issue-preview.js';
   import PreviewLoadError from './PreviewLoadError.svelte';
@@ -65,6 +67,7 @@
   let template = $state('');
   let templateData = $state<any>(null);
   let issueData = $state<IssuePreviewData | null>(null);
+  let mediaData = $state<MediaStatus | null>(null);
   let meta = $state<PreviewMetadata | null>(null);
   let documentDetails = $state<PreviewDocumentDetails | null>(null);
   let added = $state<number | null>(null);
@@ -230,6 +233,7 @@
     template = '';
     templateData = null;
     issueData = null;
+    mediaData = null;
     documentDetails = null;
     showEmbeddedVideos = false;
     showVersions = false;
@@ -258,8 +262,10 @@
       template = data.template || '';
       templateData = template === 'video' ? parseTemplateData(data.content) : null;
       issueData = template === 'issue' ? parseIssuePreview(data.content) : null;
+      mediaData = template === 'yt_downloader' ? parseMediaStatus(data.content) : null;
+      if (template === 'yt_downloader' && !mediaData) throw new Error('Invalid media status');
       content =
-        template === 'video' || template === 'issue'
+        template === 'video' || template === 'issue' || template === 'yt_downloader'
           ? ''
           : data.content || '<p>No content available</p>';
       // Always update metadata (server always returns current doc's metadata regardless of version).
@@ -372,7 +378,7 @@
         <span role="status" class="font-inter text-text-brand-muted text-sm">Loading…</span>
       {/if}
     </div>
-  {:else if content || templateData || issueData}
+  {:else if content || templateData || issueData || mediaData}
     <div
       class="preview-header border-border-brand-muted flex shrink-0 flex-col gap-0.5 border-b-[2px] px-4 py-2.5"
     >
@@ -720,7 +726,9 @@
               {/each}
             </div>
           {/if}
-          {#if template === 'video' && templateData}
+          {#if template === 'yt_downloader' && mediaData}
+            <MediaPreview data={mediaData} />
+          {:else if template === 'video' && templateData}
             <VideoPreview data={templateData} />
           {:else if template === 'issue' && issueData}
             <IssuePreview data={issueData} />
