@@ -65,7 +65,7 @@ description: 'Understand and configure the built in content handlers used for in
     }
   ];
 
-  const ytVideoDownloaderOptions = [
+  const ytDownloaderOptions = [
     {
       name: 'binary',
       type: 'string',
@@ -88,7 +88,7 @@ description: 'Understand and configure the built in content handlers used for in
       name: 'max_concurrent_jobs',
       type: 'int',
       defaultValue: '2',
-      description: 'Maximum number of downloader jobs running at once. Set to zero for no limit.',
+      description: 'Maximum number of background download attempts running at once. Zero uses the default two workers.',
     },
     {
       name: 'backend',
@@ -157,10 +157,10 @@ extractor is omitted from the config, its built-in defaults apply.
 
 Controls whether the extractor participates in the chain.
 
-| Value   | Effect                                                                                                       |
-| ------- | ------------------------------------------------------------------------------------------------------------ |
-| `true`  | Extractor is active. The external-tool extractors `ytdlp` and `yt_video_downloader` are disabled by default. |
-| `false` | Extractor is skipped for automatic indexing and preview selection                                            |
+| Value   | Effect                                                                                                 |
+| ------- | ------------------------------------------------------------------------------------------------------ |
+| `true`  | Extractor is active. The external-tool extractors `ytdlp` and `yt_downloader` are disabled by default. |
+| `false` | Extractor is skipped for automatic indexing and preview selection                                      |
 
 ### `options`
 
@@ -386,7 +386,18 @@ application shell when the rendered block content is missing.
 **Matches:** nonroot pages on `notion.so`, `www.notion.so`, and any
 `*.notion.site` domain.
 
-### `yt_video_downloader`
+<span id="yt_video_downloader"></span>
+
+### `yt_downloader`
+
+`extractors.yt_video_downloader` remains a configuration alias. New configuration,
+extractor lists and preview-menu entries use `yt_downloader`; saved legacy preview
+selections still resolve to the same single extractor. Conflicting overlapping
+values under both names in one configuration layer are rejected instead of
+choosing a winner. Matching or disjoint values combine into one entry. Normal
+file/managed/override precedence still applies across layers under either name.
+Reading or reloading a legacy configuration does not rewrite it, move media,
+or rename the existing cache/report directory.
 
 A local download enricher and preview renderer for this Hister checkout. It
 invokes the configured `yt_downloader` executable in video and audio-only
@@ -394,45 +405,130 @@ modes. The audio mode does not promise a particular container or stream
 composition; the downloader may use its documented audio-bearing media fallback.
 By default Hister does not request captions. Set `transcribe: true` to request
 available English captions as VTT sidecars; this does not run speech recognition
-or add captions to Hister's indexed text. The enricher leaves the source
-document's searchable content intact and records validated media file URIs in
-its metadata. Its name appears in the preview extractor menu; selecting it
-shows the recorded video-mode and audio-mode files on the original YouTube
-result, without creating separate search results. The normal content extractor
-(such as `ytdlp`) continues to provide the usual preview. The media output
-directory does not need to be configured under `indexer.directories`.
+or add captions to Hister's indexed text. The enricher stages a server-owned
+download request; work is accepted only after the source document commits.
+Background workers download independently, so normal content extraction and
+searchable indexing do not wait for media to finish. A pair becomes ready only
+after both files pass manifest/file validation and atomic registry publication.
+
+Select this extractor in the preview menu to see **In queue**, **Starting**,
+**Downloading**, **Downloaded — waiting for audio**, **Finalizing**,
+and terminal failure/interruption states. The preview polls the read-only
+`/api/yt_downloader/status?document_id=...` endpoint while work is active;
+closing it stops polling, not the accepted download. Playback links appear
+only for committed artifacts whose files are available. Missing and retired
+files have no playback links and are not described as queued. A working older
+download remains playable while a refresh is queued or fails. No separate
+search results are created. Normal content extractors (such as `ytdlp`) still
+provide the usual content preview. The media output directory does not need
+to be configured under `indexer.directories`.
 
 Each invocation gets a unique job ID and media subdirectory under `output_dir`.
 Hister accepts paths only from the invocation's completed JSON result manifest;
 it does not guess from downloader logs or scan the output directory. The
 configured executable must implement the named-job flags and **result JSON
 schema v1** (`--job-id`, `--output-root`, `--artifacts-root`, and
-`--result-json`). Older or incompatible downloader builds fail enrichment with
-an upgrade hint, while Hister's normal extraction chain continues. Successful
-media and failed-attempt files are retained; Hister removes the temporary
-result manifest but does not automatically delete media directories. Per-job
-artifact directories are retained under the user's local cache. Re-index a
-YouTube page explicitly to replace old or incorrect saved references.
+`--result-json`). Older or incompatible downloader builds fail the background
+attempt with an upgrade hint in the server log; normal indexing and the previous
+selection are unaffected. Operational reports and transcripts are not playable
+artifacts. Submitted/imported metadata cannot grant access to any media file.
+
+New links use `/api/yt_downloader/media?id=...`. IDs are not bearer credentials:
+every request checks source visibility and the server-owned binding. Legacy
+`/api/yt_video_downloader/media?document_id=...&uri=...` links resolve only through
+verified retained bindings, never metadata. Successful refreshes and index
+rebuilds retain previously issued links and their original files. Historical
+files predating the trusted registry are **not automatically authorized**;
+explicit verified administrative reconciliation is still required.
+
+For an authorized live binding, unavailable media links return a safe JSON
+error rather than playable content: **404 `media_missing`** for a missing file,
+**404 `media_unavailable`** when opening or file validation fails, and
+**410 `media_retired`** for an intentionally retired artifact. A registry read
+failure after source authorization returns **503 `media_registry_unavailable`**.
+Unknown, foreign, revoked and suspended bindings remain indistinguishable plain
+404s, including for old links. Diagnostic responses are not cached; HEAD omits
+the diagnostic body. Logs for these diagnostics contain only bounded codes and
+server-owned artifact IDs, not file paths, legacy URIs or raw errors. Reading
+an unavailable link does not schedule a replacement; status reports separately
+whether real work is active.
+
+Fresh unprocessed page submissions request a refresh. Processed imports,
+`Save`, index rebuilds and status/preview reads do not request downloads.
+Compatible in-flight requests for the same source/owner/options reuse the real
+attempt; a later fresh submission after it finishes requests another attempt.
+Hister retains media and failed-attempt files. It removes temporary result
+manifests, not media directories; per-job reports remain in the local cache.
+Deletion revokes bindings without deleting bytes, and re-add does not revive
+old links. Ownership moves cancel incompatible work and transfer retained
+history; a partial SQL/index move remains unavailable until deliberately
+reconciled. Cleanup and legacy reconciliation are not automatic.
 
 The extractor is **disabled by default**. Enable it only after installing a
 compatible `yt_downloader` build. This extractor is local to this custom Hister
-build and is not included in Hister's published binary. Cancellation terminates
-the downloader process group on Linux and macOS; other platforms currently stop
-the downloader process itself, but may not stop its child processes.
+build and is not included in Hister's published binary. Shutdown interrupts
+claimed work; queued work resumes after restart when the extractor is enabled.
+If disabled on restart, unresolved work is marked interrupted rather than shown
+as queued without a dispatcher. Cancelling accepted work or deleting its source
+fences publication and terminates the downloader process group on Linux and
+macOS; other platforms may not stop child processes. Merely closing an indexing
+request or preview does not cancel already accepted work.
 
 **Matches:** supported video URLs on `youtube.com`, `youtube-nocookie.com`, and
 `youtu.be`, including watch, shorts, live, embed, and short-link forms. Playlist,
 channel, and other pages without an unambiguous video ID are not downloaded.
 
+#### Retry and cancel commands
+
+These POST APIs use the same authentication and CSRF protections as other
+write APIs. In multi-user mode, only the source owner or an administrator may
+mutate its downloads. Shared read access is insufficient; only administrators
+may mutate shared user-zero sources. Public read-only servers cannot accept
+commands. Submission ownership headers cannot change a command's scope.
+
+Read the status endpoint for `document_id` and `attempt.id`, then send only:
+
+```json
+{ "document_id": "<source document ID>", "attempt_id": "<attempt ID>" }
+```
+
+- **`POST /api/yt_downloader/retry`** retries the latest failed, cancelled or
+  interrupted attempt on an existing committed source, without re-indexing its
+  content or replacing the previous ready pair. Current server downloader
+  settings and the caller's current URL rules apply; a saved manual skip-rule
+  override is preserved. Disabled downloaders and incomplete ownership moves
+  cannot start work. Executable paths, options and ownership cannot come from
+  the command body or the failed job's old settings.
+- **`POST /api/yt_downloader/cancel`** cancels exactly the named queued,
+  starting, downloading or finalizing attempt. Publication is fenced before
+  signalling its process group. Repeating that cancellation is harmless and
+  cannot cancel a later retry. Already-published artifacts are not revoked.
+
+Retry returns **202** for a new accepted intent, or **200** for its existing
+idempotent receipt. The old terminal attempt ID is the idempotency key: repeated
+requests return the same actual successor, including its later terminal state,
+without starting more work. Compatible active work may be reused. To retry a
+successor that subsequently fails, use that successor's ID from status, not its
+parent's ID. Cancel returns **200** after its cancellation is committed.
+
+Responses contain only `attempt_id` and `state`, plus `replayed` for retry.
+The attempt state is not proof that files remain available; use status for
+playback availability.
+Invalid/stale transitions or already-won publication return **409**; current
+URL-rule exclusions return **406**. Unknown/out-of-scope attempts return **404**,
+and unavailable dispatch/storage returns **503**. Both commands retain existing
+ready files and historical links. Status/preview reads still never enqueue work;
+these APIs do not add preview action buttons.
+
 #### Options
 
-<ConfigReference items={ytVideoDownloaderOptions} />
+<ConfigReference items={ytDownloaderOptions} />
 
 #### Example configuration
 
 ```yaml
 extractors:
-  yt_video_downloader:
+  yt_downloader:
     enable: true
     options:
       binary: yt_downloader

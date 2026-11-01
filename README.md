@@ -71,15 +71,19 @@ cd hister
 ./manage.sh build
 ```
 
-### `yt_video_downloader` extractor
+### `yt_downloader` extractor
 
-The optional `yt_video_downloader` extractor invokes the separately installed
+The optional `yt_downloader` extractor invokes the separately installed
 `yt_downloader` executable for video and audio-only downloads. It leaves indexed
 content unchanged and can download caption sidecars when
-`extractors.yt_video_downloader.options.transcribe` is enabled. Selecting it in
+`extractors.yt_downloader.options.transcribe` is enabled. Selecting it in
 the preview extractor menu shows media links on the original YouTube result.
 See [Extractors](webui/website/src/content/docs/extractors.md) for setup and
-configuration. The extractor is disabled by default.
+configuration. The extractor is disabled by default. Existing
+`extractors.yt_video_downloader` configurations and legacy preview/media URLs
+remain supported. Only one extractor is registered; conflicting settings under
+both configuration names are rejected. Reading an old config does not rewrite
+it or move existing downloads.
 
 To build and run this checkout with Nix:
 
