@@ -26,6 +26,28 @@ var ErrDBType = errors.New("unknown database type")
 // DB is the global database instance.
 var DB *gorm.DB
 
+var databaseIdentity struct {
+	db        *gorm.DB
+	kind      config.DBTypedef
+	dsn       string
+	directory string
+}
+
+// DatabaseMatches binds an indexer to the model store initialized for its own
+// configuration. Once bound, lifecycle operations must propagate SQL failures
+// rather than silently skip revocation when a database/schema probe fails.
+func DatabaseMatches(c *config.Config) bool {
+	kind, dsn := c.DatabaseConnection()
+	return DB != nil && DB == databaseIdentity.db && kind == databaseIdentity.kind &&
+		dsn == databaseIdentity.dsn && c.FullPath("") == databaseIdentity.directory
+}
+
+func rememberDatabase(c *config.Config) {
+	databaseIdentity.db = DB
+	databaseIdentity.kind, databaseIdentity.dsn = c.DatabaseConnection()
+	databaseIdentity.directory = c.FullPath("")
+}
+
 // AccessMode controls database access and schema migration behavior.
 type AccessMode uint8
 
@@ -83,6 +105,7 @@ func initDatabase(c *config.Config, accessMode AccessMode) error {
 		return fmt.Errorf("failed to setup join table for URL history: %w", err)
 	}
 	if accessMode == ReadOnly {
+		rememberDatabase(c)
 		return nil
 	}
 	dbVer, initialized := migrationVersion()
@@ -103,6 +126,7 @@ func initDatabase(c *config.Config, accessMode AccessMode) error {
 		// the current version to avoid replaying historical migrations against it.
 		DB.Save(&Database{Version: uint(len(migrations))})
 	}
+	rememberDatabase(c)
 	return nil
 }
 
@@ -118,6 +142,10 @@ func automigrate() error {
 		&DocumentVersion{},
 		&EmbeddingJob{},
 		&WebSession{},
+		&MediaSource{},
+		&MediaAttempt{},
+		&MediaSet{},
+		&MediaArtifact{},
 	)
 }
 
