@@ -260,6 +260,7 @@ func init() {
 	rootCmd.AddCommand(reindexCmd)
 	rootCmd.AddCommand(cleanupCmd)
 	rootCmd.AddCommand(purgeCmd)
+	rootCmd.AddCommand(mediaCmd)
 	purgeCmd.Flags().String("before", "", "exclusive cutoff date (YYYY-MM-DD in UTC) or RFC3339 timestamp")
 	purgeCmd.Flags().Bool("versions", false, "purge stored document versions created before the cutoff")
 	purgeCmd.Flags().Bool("history", false, "purge old unpinned opened result history and unreferenced query and URL records")

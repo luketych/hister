@@ -37,6 +37,10 @@ func configureCommandScopes() {
 	setCommandScope(configPathCmd, executionScopeLocal)
 	setCommandScope(configShowCmd, executionScopeLocal, "server-url", "token", "search-url")
 	setCommandScope(configValidateCmd, executionScopeLocal, "server-url", "token", "search-url")
+	setCommandScope(mediaCmd, executionScopeLocal)
+	for _, cmd := range mediaCmd.Commands() {
+		setCommandScope(cmd, executionScopeLocal)
+	}
 	setCommandScope(doctorCmd, executionScopeHybrid, "client-timeout", "search-url")
 	setCommandScope(listURLsCmd, executionScopeHybrid)
 	setCommandScope(listFilesCmd, executionScopeLocal)
@@ -89,6 +93,7 @@ func configureCommandScopes() {
 	configureScopeGroups(crawlCmd)
 	configureScopeGroups(companionCmd)
 	configureScopeGroups(configCmd)
+	configureScopeGroups(mediaCmd)
 	configureScopeGroups(userCmd)
 	configureScopedHelp()
 }

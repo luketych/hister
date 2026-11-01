@@ -478,6 +478,50 @@ request or preview does not cancel already accepted work.
 `youtu.be`, including watch, shorts, live, embed, and short-link forms. Playlist,
 channel, and other pages without an unambiguous video ID are not downloaded.
 
+#### Historical evidence inventory (dry-run only)
+
+Use the local CLI to inspect explicitly selected historical Hister job IDs:
+
+```bash
+hister media reconcile \
+  --state-dir /path/to/hister/yt_video_downloader \
+  --media-root /path/to/media \
+  hister-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-video \
+  hister-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-audio
+```
+
+Replace the example IDs with known report jobs. Both directories must already
+exist. The state directory is the retained `yt_video_downloader` cache directory,
+not its `artifacts` child. The command reads only the fixed
+`artifacts/<job>/jobs/<job>/request.json`, `result.json` and `manifest.json`
+reports and their named provenance/media files. It does not scan filenames,
+titles, modification times or unrelated downloads to guess associations.
+
+This command **always performs a dry run** and has no apply or owner-mapping
+option. It skips runtime configuration and logging initialization, never opens
+SQL/Bleve, contacts a server or downloader, registers artifacts, schedules work,
+or moves/deletes files. Explicit roots are required rather than guessed from
+configuration. JSON output is versioned, deterministic and includes relative
+candidate paths, bounded issue codes and a digest of the inspected JSON evidence
+(not a media-content hash or signature). A successful exit means the inventory
+was produced, not that all selected jobs passed inspection.
+
+Consistent request/result/manifest/provenance identities, modes, paths and file
+sizes still yield **`owner_approval_required`**, never ready or authorized.
+Unsigned reports cannot prove which Hister user initiated a job; report fields
+claiming ownership are ignored. Sources with missing roles are marked
+`incomplete_pair`; multiple possible jobs are `ambiguous_pair`. Even a single
+video/audio combination requires `pair_approval_required`, not an inferred
+pairing or current selection. Incomplete, mismatched, unsafe or unsupported
+reports are blocked. Unknown historical formats are not silently upgraded.
+
+The inventory does not check the live source document, its owner/incarnation,
+or existing registry registrations. Explicit owner/pair approval, current-source
+checks, idempotent registration and revalidation at application time remain
+separate pending work. This command alone does **not** repair Greenpath or any
+other historical playback links. Retain the files and evidence; do not treat
+this JSON as an authorization manifest.
+
 #### Retry and cancel commands
 
 These POST APIs use the same authentication and CSRF protections as other
