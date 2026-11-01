@@ -520,6 +520,38 @@ or existing registry registrations. It cannot authorize media or repair
 Greenpath or any other historical playback links. Retain the files and evidence;
 do not treat this inventory JSON as an authorization manifest.
 
+#### Explicit source-incarnation bootstrap
+
+Historical approvals require a live registry source ID. For an already-indexed
+YouTube document from before the registry existed, first use the admin-only
+bootstrap check to verify the exact indexed document ID, owner and URL. The check
+is read-only; it does not infer the owner, create rows, or change the selection.
+Use the exact returned confirmation in a separately confirmed apply:
+
+```bash
+hister media bootstrap-check \
+  --document-id '<exact indexed document ID>' \
+  --owner-id 0 \
+  --url 'https://www.youtube.com/watch?v=abcdefghijk'
+
+hister media bootstrap-apply \
+  --document-id '<exact indexed document ID>' \
+  --owner-id 0 \
+  --url 'https://www.youtube.com/watch?v=abcdefghijk' \
+  --confirmation <confirmation_sha256> --yes
+```
+
+For a user-owned document, pass its actual indexed `owner_id` instead of zero.
+Both endpoints are administrator-only. The server verifies the exact URL, owner,
+document ID and YouTube match against its live index. Apply rejects a stale check;
+it creates only a new empty source incarnation and returns its `source_id`. It
+does not register historical files, create attempts, or revive a revoked
+incarnation. If a source already exists, check/apply report its existing ID
+idempotently. Put that returned source ID in the reviewed approval below, then
+run `hister media check` and the guarded `hister media apply` workflow. Do not
+bootstrap or import live history without a consistent backup and explicit
+operator approval.
+
 #### Historical approval document and guarded registration
 
 An explicitly reviewed approval maps one exact video/audio pair to an **existing

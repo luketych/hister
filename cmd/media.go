@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/asciimoo/hister/client"
 	yt "github.com/asciimoo/hister/server/extractor/extractors/yt_downloader"
 
 	"github.com/spf13/cobra"
@@ -104,8 +105,87 @@ func newMediaCommand() *cobra.Command {
 	_ = apply.MarkFlagRequired("approval")
 	_ = apply.MarkFlagRequired("confirmation")
 
-	parent.AddCommand(reconcile, check, apply)
+	bootstrapCheck := &cobra.Command{
+		Use:   "bootstrap-check",
+		Short: "Read-only admin check before establishing an indexed YouTube source",
+		Long:  "Verify that document ID, explicit owner ID and URL match one currently indexed YouTube document. The server does not create a source row during this check. Apply rechecks that exact indexed binding and rejects a changed source-registry plan.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			request, err := mediaSourceBootstrapRequestFlags(cmd)
+			if err != nil {
+				return err
+			}
+			c, _, err := inspectConfig()
+			if err != nil {
+				return err
+			}
+			result, err := newClientForConfig(c).CheckMediaSourceBootstrap(cmd.Context(), request)
+			if err != nil {
+				return err
+			}
+			return writeMediaHistoryJSON(cmd, result)
+		},
+	}
+	addMediaSourceBootstrapFlags(bootstrapCheck, false)
+
+	bootstrapApply := &cobra.Command{
+		Use:   "bootstrap-apply",
+		Short: "Establish the checked YouTube media source incarnation",
+		Long:  "Create a fresh source incarnation only after the admin-only read-only bootstrap check. Requires the exact confirmation SHA-256 from that check and --yes. This does not import historical files or infer/modify ownership.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			if yes, _ := cmd.Flags().GetBool("yes"); !yes {
+				return errors.New("--yes is required to establish a media source incarnation")
+			}
+			confirmation, _ := cmd.Flags().GetString("confirmation")
+			if !validMediaHistoryConfirmation(confirmation) {
+				return errors.New("--confirmation must be the 64-character lowercase SHA-256 from a recent bootstrap check")
+			}
+			request, err := mediaSourceBootstrapRequestFlags(cmd)
+			if err != nil {
+				return err
+			}
+			c, _, err := inspectConfig()
+			if err != nil {
+				return err
+			}
+			result, err := newClientForConfig(c).ApplyMediaSourceBootstrap(cmd.Context(), request, confirmation)
+			if err != nil {
+				return err
+			}
+			return writeMediaHistoryJSON(cmd, result)
+		},
+	}
+	addMediaSourceBootstrapFlags(bootstrapApply, true)
+
+	parent.AddCommand(reconcile, check, apply, bootstrapCheck, bootstrapApply)
 	return parent
+}
+
+func addMediaSourceBootstrapFlags(cmd *cobra.Command, apply bool) {
+	cmd.Flags().String("document-id", "", "Exact live indexed YouTube document ID")
+	cmd.Flags().Uint("owner-id", 0, "Explicit owner ID from the live index (required; use 0 for a global document)")
+	cmd.Flags().String("url", "", "Exact YouTube URL stored in the live indexed document")
+	_ = cmd.MarkFlagRequired("document-id")
+	_ = cmd.MarkFlagRequired("owner-id")
+	_ = cmd.MarkFlagRequired("url")
+	if apply {
+		cmd.Flags().String("confirmation", "", "Exact confirmation SHA-256 returned by bootstrap-check")
+		cmd.Flags().Bool("yes", false, "Confirm this checked source-incarnation creation")
+		_ = cmd.MarkFlagRequired("confirmation")
+	}
+}
+
+func mediaSourceBootstrapRequestFlags(cmd *cobra.Command) (client.MediaSourceBootstrapRequest, error) {
+	documentID, _ := cmd.Flags().GetString("document-id")
+	ownerID, _ := cmd.Flags().GetUint("owner-id")
+	url, _ := cmd.Flags().GetString("url")
+	if documentID == "" || url == "" || len(documentID) > 4096 || len(url) > 4096 {
+		return client.MediaSourceBootstrapRequest{}, errors.New("--document-id and --url must identify an indexed source")
+	}
+	return client.MediaSourceBootstrapRequest{DocumentID: documentID, OwnerID: ownerID, URL: url}, nil
 }
 
 func readMediaHistoryApproval(cmd *cobra.Command) ([]byte, error) {

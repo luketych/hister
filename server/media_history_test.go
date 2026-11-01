@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/asciimoo/hister/config"
+	"github.com/asciimoo/hister/server/document"
 	yt "github.com/asciimoo/hister/server/extractor/extractors/yt_downloader"
 	"github.com/asciimoo/hister/server/indexer"
 	"github.com/asciimoo/hister/server/media"
@@ -103,6 +104,114 @@ func TestHistoryOperatorRequiresTrustworthyAdminAuthority(t *testing.T) {
 				t.Fatalf("historyOperator() = %#v, %v; allow=%v", actor, ok, tc.allow)
 			}
 		})
+	}
+}
+
+func TestMediaSourceBootstrapHTTPIsAdminOnlyCheckedAndNonDestructive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testutil.Config(t)
+	cfg.App.UserHandling, cfg.App.Public = true, true
+	cfg.Server.Database = "media-source-bootstrap.sqlite3"
+	cfg.Indexer.DetectLanguages = false
+	if err := cfg.UpdateBaseURL("http://127.0.0.1:4433"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.SaveRules(); err != nil {
+		t.Fatal(err)
+	}
+	testutil.InitModelWithConfig(t, cfg)
+	previousStore := sessionStore
+	sessionStore = newSessionStore([]byte(strings.Repeat("x", 32)), cfg.BaseURL(""), sessionMaxAge)
+	t.Cleanup(func() { sessionStore = previousStore })
+	owner := testutil.CreateUser(t, "bootstrap-owner")
+	admin, err := model.CreateUser("bootstrap-admin", "password123", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := newServerTestIndexer(t, cfg)
+	url := "https://www.youtube.com/watch?v=bootstrap01"
+	documentID := document.GetDocID(owner.ID, url)
+	if err := idx.Add(&document.Document{URL: url, UserID: owner.ID, Text: "pre-registry YouTube source", Processed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.GetMediaSource(documentID); err == nil {
+		t.Fatal("fixture unexpectedly created a media source")
+	}
+	handler := registerEndpoints(cfg, idx)
+	body, err := json.Marshal(map[string]any{"document_id": documentID, "owner_id": owner.ID, "url": url})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(path string, user *model.User, payload, confirmation string) *httptest.ResponseRecorder {
+		t.Helper()
+		headers := map[string]string{"Content-Type": "application/json", "Origin": "hister://"}
+		if user != nil {
+			headers["X-Access-Token"] = user.Token
+		}
+		if confirmation != "" {
+			headers[mediaSourceBootstrapConfirmationHeader] = confirmation
+		}
+		return testutil.ServeHTTP(t, handler, http.MethodPost, path, strings.NewReader(payload), headers)
+	}
+	checkPath := "/api/yt_downloader/source/check"
+	applyPath := "/api/yt_downloader/source/apply"
+	if rec := post(checkPath, owner, string(body), ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("ordinary owner check = %d %s", rec.Code, rec.Body)
+	}
+	checked := post(checkPath, admin, string(body), "")
+	if checked.Code != http.StatusOK {
+		t.Fatalf("admin check = %d %s", checked.Code, checked.Body)
+	}
+	var check mediaSourceBootstrapCheckResponse
+	if err := json.Unmarshal(checked.Body.Bytes(), &check); err != nil || check.DocumentID != documentID || check.OwnerID != owner.ID || check.Replayed || check.ExistingSourceID != "" || len(check.ConfirmationSHA256) != 64 {
+		t.Fatalf("bootstrap check response = %#v, %v", check, err)
+	}
+	if _, err := model.GetMediaSource(documentID); err == nil {
+		t.Fatal("read-only check created a source")
+	}
+	if rec := post(applyPath, admin, string(body), ""); rec.Code != http.StatusConflict {
+		t.Fatalf("apply without confirmation = %d %s", rec.Code, rec.Body)
+	}
+	if _, err := model.GetMediaSource(documentID); err == nil {
+		t.Fatal("rejected apply created a source")
+	}
+	if rec := post(applyPath, admin, string(body), strings.Repeat("0", 64)); rec.Code != http.StatusConflict {
+		t.Fatalf("apply with stale confirmation = %d %s", rec.Code, rec.Body)
+	}
+	applied := post(applyPath, admin, string(body), check.ConfirmationSHA256)
+	if applied.Code != http.StatusCreated {
+		t.Fatalf("confirmed apply = %d %s", applied.Code, applied.Body)
+	}
+	var result mediaSourceBootstrapApplyResponse
+	if err := json.Unmarshal(applied.Body.Bytes(), &result); err != nil || result.DocumentID != documentID || result.OwnerID != owner.ID || result.SourceID == "" || result.Replayed {
+		t.Fatalf("bootstrap apply response = %#v, %v", result, err)
+	}
+	source, err := model.GetMediaSource(documentID)
+	if err != nil || source.ID != result.SourceID || source.UserID != owner.ID || source.SelectedSetID != "" {
+		t.Fatalf("created source = %#v, %v", source, err)
+	}
+	for _, malformed := range []string{
+		`{"document_id":"a","document_id":"b","owner_id":1,"url":"https://www.youtube.com/watch?v=abcdefghijk"}`,
+		`{"Document_ID":"a","owner_id":1,"url":"https://www.youtube.com/watch?v=abcdefghijk"}`,
+		`{"document_id":"a","owner_id":1,"url":"https://www.youtube.com/watch?v=abcdefghijk","extra":true}`,
+		`{"document_id":"a","owner_id":null,"url":"https://www.youtube.com/watch?v=abcdefghijk"}`,
+	} {
+		if rec := post(checkPath, admin, malformed, ""); rec.Code != http.StatusBadRequest {
+			t.Fatalf("malformed bootstrap request = %d %s for %s", rec.Code, rec.Body, malformed)
+		}
+	}
+	if rec := post(checkPath, admin, strings.Replace(string(body), url, "https://www.youtube.com/watch?v=otherVideo1", 1), ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("URL mismatch check = %d %s", rec.Code, rec.Body)
+	}
+	if count := idx.GetByDocID(documentID); count == nil || count.Text != "pre-registry YouTube source" || count.AddCount != 1 {
+		t.Fatalf("bootstrap changed indexed document: %#v", count)
+	}
+	var attempts, receipts int64
+	if err := model.DB.Model(&model.MediaAttempt{}).Count(&attempts).Error; err != nil || attempts != 0 {
+		t.Fatalf("bootstrap created attempts: %d %v", attempts, err)
+	}
+	if err := model.DB.Model(&model.MediaHistoryReceipt{}).Count(&receipts).Error; err != nil || receipts != 0 {
+		t.Fatalf("bootstrap created history receipts: %d %v", receipts, err)
 	}
 }
 

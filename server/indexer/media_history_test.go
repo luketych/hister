@@ -83,6 +83,49 @@ func historyImporter(t *testing.T, selected bool) historyImportFixture {
 	return fixture
 }
 
+func TestMediaSourceBootstrapChecksLiveDocumentAndCreatesFreshIncarnation(t *testing.T) {
+	f := historyImporter(t, false)
+	original, err := model.GetMediaSourceByID(f.approval.Source.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.DB.Delete(&model.MediaSource{}, "id = ?", original.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	actor := MediaActor{IsAdmin: true}
+	checked, err := f.indexer.CheckMediaSourceBootstrap(context.Background(), original.DocumentID, mediaSourceURL, original.UserID, actor)
+	if err != nil || checked.Replayed || checked.ExistingSourceID != "" || len(checked.ConfirmationSHA256) != 64 {
+		t.Fatalf("bootstrap check = %#v, %v", checked, err)
+	}
+	if _, err := model.GetMediaSource(original.DocumentID); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("check created a source: %v", err)
+	}
+	if _, err := f.indexer.CheckMediaSourceBootstrap(context.Background(), original.DocumentID, "https://www.youtube.com/watch?v=otherVideo1", original.UserID, actor); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("mismatched URL check = %v", err)
+	}
+	if _, err := f.indexer.CheckMediaSourceBootstrap(context.Background(), original.DocumentID, mediaSourceURL, original.UserID+1, actor); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("mismatched owner check = %v", err)
+	}
+	if _, err := f.indexer.CheckMediaSourceBootstrap(context.Background(), original.DocumentID, mediaSourceURL, original.UserID, MediaActor{}); !errors.Is(err, ErrMediaSourceBootstrapForbidden) {
+		t.Fatalf("unauthorized check = %v", err)
+	}
+	if _, err := f.indexer.ApplyMediaSourceBootstrap(context.Background(), original.DocumentID, mediaSourceURL, original.UserID, "", actor); !errors.Is(err, ErrMediaSourceBootstrapConfirmation) {
+		t.Fatalf("missing confirmation = %v", err)
+	}
+	result, err := f.indexer.ApplyMediaSourceBootstrap(context.Background(), original.DocumentID, mediaSourceURL, original.UserID, checked.ConfirmationSHA256, actor)
+	if err != nil || result.Replayed || result.Source.ID == original.ID || result.Source.DocumentID != original.DocumentID || result.Source.UserID != original.UserID {
+		t.Fatalf("bootstrap apply = %#v, %v", result, err)
+	}
+	replayCheck, err := f.indexer.CheckMediaSourceBootstrap(context.Background(), original.DocumentID, mediaSourceURL, original.UserID, actor)
+	if err != nil || !replayCheck.Replayed || replayCheck.ExistingSourceID != result.Source.ID {
+		t.Fatalf("existing source check = %#v, %v", replayCheck, err)
+	}
+	replay, err := f.indexer.ApplyMediaSourceBootstrap(context.Background(), original.DocumentID, mediaSourceURL, original.UserID, replayCheck.ConfirmationSHA256, actor)
+	if err != nil || !replay.Replayed || replay.Source.ID != result.Source.ID {
+		t.Fatalf("idempotent apply = %#v, %v", replay, err)
+	}
+}
+
 func TestHistoryCheckAndConfirmedApply(t *testing.T) {
 	f := historyImporter(t, true)
 	actor := MediaActor{IsAdmin: true}

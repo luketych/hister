@@ -62,6 +62,23 @@ func TestMediaReconcileIsDryRunWithoutRuntimeInitialization(t *testing.T) {
 	}
 }
 
+func TestMediaSourceBootstrapCommandsRequireExplicitBindingAndConfirmation(t *testing.T) {
+	for _, args := range [][]string{
+		{"bootstrap-check"},
+		{"bootstrap-apply"},
+		{"bootstrap-apply", "--document-id", "id", "--owner-id", "0", "--url", "https://www.youtube.com/watch?v=abcdefghijk", "--confirmation", strings.Repeat("a", 64)},
+	} {
+		command := newMediaCommand()
+		var out bytes.Buffer
+		command.SetOut(&out)
+		command.SetErr(&out)
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil {
+			t.Fatalf("accepted incomplete or unconfirmed source bootstrap: %v", args)
+		}
+	}
+}
+
 func TestMediaHistoryCommandsRequireExplicitApprovalAndConfirmation(t *testing.T) {
 	root := t.TempDir()
 	approvalPath := filepath.Join(root, "approval.json")
