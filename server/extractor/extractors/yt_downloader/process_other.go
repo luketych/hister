@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //go:build !linux && !darwin
 
-package yt_video_downloader
+package yt_downloader
 
 import "os/exec"
 

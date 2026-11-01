@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //go:build localmedia && (darwin || linux)
 
-package yt_video_downloader
+package yt_downloader
 
 import (
 	"context"
@@ -22,6 +22,9 @@ import (
 	"github.com/asciimoo/hister/files"
 	"github.com/asciimoo/hister/server/document"
 	"github.com/asciimoo/hister/server/extractor/sdk"
+	"github.com/asciimoo/hister/server/media"
+	"github.com/asciimoo/hister/server/model"
+	"github.com/asciimoo/hister/server/testutil"
 )
 
 const (
@@ -86,7 +89,7 @@ func TestLocalMediaCandidateEndToEnd(t *testing.T) {
 	}
 
 	wrappedBinary := observingCandidateCommand(t, binary, captureRoot)
-	extractor := &YTVideoDownloader{}
+	extractor := &YTDownloader{}
 	if err := extractor.SetConfig(&config.Extractor{
 		Enable: true,
 		Options: map[string]any{
@@ -182,6 +185,63 @@ func TestLocalMediaCandidateEndToEnd(t *testing.T) {
 	assertCapturedCandidateJobs(t, captureRoot, outputRoot, secondURL, localFixtureVideoB, 2)
 	assertDocumentReferencesMatchReports(t, docA, docA.Metadata[MediaReferencesMetadataKey].(string), outputRoot, captureRoot)
 	assertDocumentReferencesMatchReports(t, docB, docB.Metadata[MediaReferencesMetadataKey].(string), outputRoot, captureRoot)
+
+	t.Run("durable worker publication", func(t *testing.T) {
+		testutil.InitModel(t)
+		request := media.Request{URL: firstURL, UserID: 31, Binary: wrappedBinary, OutputRoot: outputRoot, Backend: "yt-dlp", Timeout: 120}
+		queue, err := media.NewQueue(1, RunMediaAttempt, func(source *model.MediaSource, request media.Request) bool {
+			return source.DocumentID == document.GetDocID(request.UserID, request.URL) && source.UserID == request.UserID
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(queue.Close)
+		id := document.GetDocID(request.UserID, request.URL)
+		source, err := model.EnsureMediaSource(id, request.UserID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attempt, err := model.ReserveMediaAttempt(source.ID, "local-worker", string(encoded))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := queue.Accept(&media.Intent{AttemptID: attempt.ID, SourceID: source.ID, DocumentID: id, UserID: request.UserID}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.NewTimer(150 * time.Second)
+		defer deadline.Stop()
+		tick := time.NewTicker(20 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			status, err := media.ReadStatus(id, request.UserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Attempt != nil && status.Attempt.State == model.MediaReady {
+				if status.Active || len(status.Available) != 2 {
+					t.Fatalf("producer pair was not published atomically: %#v", status)
+				}
+				for _, artifact := range status.Available {
+					if artifact.State != model.MediaReady {
+						t.Fatalf("real worker artifact is unavailable: %#v", artifact)
+					}
+				}
+				break
+			}
+			if status.Attempt != nil && status.Attempt.State == model.MediaFailed {
+				t.Fatalf("real durable worker failed: %#v", status.Attempt)
+			}
+			select {
+			case <-deadline.C:
+				t.Fatal("real durable worker did not complete")
+			case <-tick.C:
+			}
+		}
+	})
 }
 
 func envOrDefault(key, fallback string) string {
@@ -191,7 +251,7 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func extractWithTimeout(extractor *YTVideoDownloader, doc *document.Document) (sdk.Decision, error) {
+func extractWithTimeout(extractor *YTDownloader, doc *document.Document) (sdk.Decision, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 	return extractor.ExtractContext(ctx, doc).Unpack()
@@ -572,8 +632,8 @@ func assertDocumentReferencesMatchReports(t *testing.T, doc *document.Document, 
 			if !strings.HasPrefix(files.FileURLToPath(uri), outputRoot+string(filepath.Separator)) {
 				t.Errorf("document reference %q escaped media output root", uri)
 			}
-			if _, err := ResolveMediaFile(doc, uri, outputRoot); err != nil {
-				t.Errorf("real producer output is not resolvable through existing Hister media validation: %q: %v", uri, err)
+			if info, err := os.Lstat(files.FileURLToPath(uri)); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+				t.Errorf("real producer output is not a nonempty regular file: %q: %v", uri, err)
 			}
 		}
 	}

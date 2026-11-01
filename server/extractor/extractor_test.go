@@ -392,7 +392,7 @@ func TestRegisteredExtractorCapabilities(t *testing.T) {
 			if !caps.Enrich || caps.Extract || caps.Preview {
 				t.Errorf("%s capabilities = %+v, want enrichment only", candidate.Name(), caps)
 			}
-		case "yt_video_downloader":
+		case "yt_downloader":
 			if !caps.Enrich || caps.Extract || !caps.Preview {
 				t.Errorf("%s capabilities = %+v, want enrichment and preview", candidate.Name(), caps)
 			}
@@ -426,7 +426,7 @@ func TestDefaultRegistryOrder(t *testing.T) {
 		"Bluesky",
 		"Twitter",
 		"Notion",
-		"yt_video_downloader",
+		"yt_downloader",
 		"Ytdlp",
 		"ChatGPT",
 		"Readability",

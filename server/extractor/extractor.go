@@ -352,7 +352,7 @@ func (r *Registry) PreviewContext(ctx context.Context, d *document.Document, nam
 	extractors := r.Extractors()
 	start := 0
 	if name != "" {
-		lower := strings.ToLower(name)
+		lower := config.CanonicalExtractorName(name)
 		found := false
 		for i, e := range extractors {
 			if strings.ToLower(e.Name()) == lower {

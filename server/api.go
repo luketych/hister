@@ -1020,16 +1020,40 @@ func init() {
 			},
 		},
 		{
+			Name:         "YouTube media status",
+			Path:         "/api/yt_downloader/status",
+			Method:       GET,
+			CSRFRequired: false,
+			Public:       true,
+			Handler:      serveMediaStatus,
+			Description:  "Read source-scoped download state and available committed artifacts without scheduling work",
+			Args: []*EndpointArg{
+				{Name: "document_id", Type: "string", Required: true, Description: "Indexed source document ID"},
+			},
+		},
+		{
+			Name:         "YouTube artifact",
+			Path:         "/api/yt_downloader/media",
+			Method:       GET,
+			CSRFRequired: false,
+			Public:       true,
+			Handler:      serveYTDownloaderMedia,
+			Description:  "Stream a committed media artifact after checking source-document access. Authorized unavailable artifacts return safe JSON diagnostics: 404 media_missing/media_unavailable, or 410 media_retired. Registry failures after source authorization return 503 media_registry_unavailable. Unknown/out-of-scope bindings remain indistinguishable 404s. Reads never schedule downloads.",
+			Args: []*EndpointArg{
+				{Name: "id", Type: "string", Required: true, Description: "Server-owned media artifact ID (not a bearer credential)"},
+			},
+		},
+		{
 			Name:         "YouTube media",
 			Path:         "/api/yt_video_downloader/media",
 			Method:       GET,
 			CSRFRequired: false,
 			Public:       true,
-			Handler:      serveYTVideoDownloaderMedia,
-			Description:  "Stream a downloaded YouTube media file associated with an indexed source document",
+			Handler:      serveYTDownloaderMedia,
+			Description:  "Resolve a legacy URI through retained source/owner bindings and stream the committed artifact. Uses the same authorization and unavailable-file diagnostics as /api/yt_downloader/media, including retired historical links. A URI alone never authorizes bytes.",
 			Args: []*EndpointArg{
 				{Name: "document_id", Type: "string", Required: true, Description: "ID of the indexed YouTube source document"},
-				{Name: "uri", Type: "string", Required: true, Description: "Media URI recorded on the source document"},
+				{Name: "uri", Type: "string", Required: true, Description: "Media URI in a trusted retained source/owner binding"},
 			},
 		},
 		{

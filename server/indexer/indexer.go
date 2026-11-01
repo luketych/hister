@@ -25,6 +25,7 @@ import (
 	"github.com/asciimoo/hister/server/indexer/querybuilder"
 	"github.com/asciimoo/hister/server/indexer/searchschema"
 	"github.com/asciimoo/hister/server/languages"
+	"github.com/asciimoo/hister/server/media"
 	"github.com/asciimoo/hister/server/metrics"
 	"github.com/asciimoo/hister/server/model"
 	"github.com/asciimoo/hister/server/vectorstore"
@@ -60,6 +61,12 @@ type Indexer struct {
 	maintenance       *maintenanceRunner
 	embeddingQueue    *embeddingQueue
 	embeddingWorkers  int
+	mediaMu           sync.Mutex
+	mediaQueue        *media.Queue
+	mediaRegistry     bool
+	mediaRetryConfig  *config.Extractor // immutable settings of this runtime generation
+	mediaClosed       bool
+	mediaCommits      [64]sync.Mutex
 	disablePreviews   bool
 	userHandling      bool
 	directories       []*config.Directory
@@ -310,6 +317,7 @@ type documentWritePlan struct {
 	newHTMLKey     string
 	newFaviconKey  string
 	needsEmbedding bool
+	mediaIntent    *media.Intent
 }
 
 // documentWriteFunc takes ownership of the plan's pending data. Immediate
@@ -356,6 +364,9 @@ type MultiBatch struct {
 	deletedIDs          map[string]struct{}
 	incrementAddCount   bool
 	stagedMetrics       []indexingMetric
+	mediaIntents        map[string]*media.Intent
+	mediaMoves          map[string]mediaMove
+	writeIDs            map[string]struct{}
 }
 
 type indexingMetric struct {
@@ -491,6 +502,10 @@ func New(cfg *config.Config) (*Indexer, error) {
 			}
 			log.Info().Msg("semantic search enabled")
 		}
+	}
+	if err := idx.initMedia(cfg); err != nil {
+		idx.Close()
+		return nil, fmt.Errorf("start media queue: %w", err)
 	}
 	idx.startMaintenance()
 	return idx, nil
@@ -1129,6 +1144,11 @@ func (i *Indexer) AddContext(ctx context.Context, d *document.Document, options 
 }
 
 func (i *Indexer) processDocument(ctx context.Context, d *document.Document) error {
+	// Rebuilds and file parsing call processing without a source-write intent.
+	// Never fall back to synchronous downloads in those paths.
+	if !media.HasStager(ctx) {
+		ctx = media.WithStager(ctx, func(media.Request) error { return errors.New("this operation does not request media refresh") })
+	}
 	if err := normalizeDocumentLanguageOverride(d); err != nil {
 		return err
 	}
@@ -1264,6 +1284,7 @@ func (i *Indexer) addDocument(ctx context.Context, d *document.Document, increme
 	if err := ctx.Err(); err != nil {
 		if plan != nil {
 			plan.data.release()
+			abandonMedia(plan.mediaIntent)
 		}
 		return err
 	}
@@ -1298,7 +1319,14 @@ func (i *Indexer) addDocument(ctx context.Context, d *document.Document, increme
 	return nil
 }
 
-func (i *Indexer) prepareDocumentWrite(ctx context.Context, d *document.Document, incrementAddCount bool) (*documentWritePlan, error) {
+func (i *Indexer) prepareDocumentWrite(ctx context.Context, d *document.Document, incrementAddCount bool) (result *documentWritePlan, err error) {
+	var intent *media.Intent
+	defer func() {
+		if result == nil {
+			abandonMedia(intent)
+		}
+	}()
+	ctx = media.WithStager(ctx, i.stageMedia(d, d.UserID, &intent))
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1340,6 +1368,11 @@ func (i *Indexer) prepareDocumentWrite(ctx context.Context, d *document.Document
 		return nil, err
 	}
 	plan.needsEmbedding = i.embedder != nil && i.vectorStore != nil && state.embeddingContentChanged(d)
+	if intent != nil && intent.DocumentID != d.ID() {
+		abandonMedia(intent)
+		intent = nil
+	}
+	plan.mediaIntent = intent
 	return &plan, nil
 }
 
@@ -1372,6 +1405,7 @@ func (i *Indexer) saveWithState(d *document.Document, state storedDocumentState)
 }
 
 func (i *Indexer) prepareStorageWrite(d *document.Document, state storedDocumentState) (documentWritePlan, error) {
+	media.StripMetadata(d.Metadata)
 	plan := documentWritePlan{}
 	if err := normalizeDocumentLanguageOverride(d); err != nil {
 		return plan, err
@@ -1420,6 +1454,12 @@ func (i *Indexer) prepareStorageWrite(d *document.Document, state storedDocument
 
 func (i *Indexer) applyDocumentWrite(d *document.Document, plan documentWritePlan) error {
 	defer plan.data.release()
+	defer abandonMedia(plan.mediaIntent)
+	unlock := i.lockMediaDocuments(d.ID())
+	defer unlock()
+	if err := validateMediaIntent(plan.mediaIntent); err != nil {
+		return err
+	}
 	log.Debug().Str("URL", d.URL).Msg("item added to index")
 	if err := plan.target.Index(d.ID(), d); err != nil {
 		return err
@@ -1428,6 +1468,9 @@ func (i *Indexer) applyDocumentWrite(d *document.Document, plan documentWritePla
 		if err := idx.Delete(d.ID()); err != nil {
 			return err
 		}
+	}
+	if err := i.acceptMedia(plan.mediaIntent); err != nil {
+		return err
 	}
 	i.cleanupDataKeys(plan.oldHTMLKeys, plan.newHTMLKey, plan.oldFaviconKeys, plan.newFaviconKey)
 	if plan.needsEmbedding {
@@ -1666,6 +1709,7 @@ func (i *Indexer) addIndexer(name, lang string) error {
 }
 
 func (i *Indexer) Close() {
+	i.stopMediaQueue()
 	i.stopEmbeddingQueue()
 	if i.embedCancel != nil {
 		i.embedCancel()
@@ -1718,6 +1762,9 @@ func newMultiBatch(idx *Indexer) *MultiBatch {
 		batches:           make(map[string]*indexBatch),
 		embeddingIDs:      make(map[string]struct{}),
 		deletedIDs:        make(map[string]struct{}),
+		mediaIntents:      make(map[string]*media.Intent),
+		mediaMoves:        make(map[string]mediaMove),
+		writeIDs:          make(map[string]struct{}),
 		incrementAddCount: false,
 	}
 }
@@ -1758,6 +1805,7 @@ func (b *MultiBatch) applyDocumentWrite(d *document.Document, plan documentWrite
 	defer func() {
 		if err != nil {
 			plan.data.release()
+			abandonMedia(plan.mediaIntent)
 		}
 	}()
 	delete(b.deletedIDs, d.ID())
@@ -1785,10 +1833,17 @@ func (b *MultiBatch) applyDocumentWrite(d *document.Document, plan documentWrite
 		}
 	}
 	b.pendingData = append(b.pendingData, plan.data)
+	if plan.mediaIntent != nil {
+		abandonMedia(b.mediaIntents[d.ID()])
+		b.mediaIntents[d.ID()] = plan.mediaIntent
+	}
+	b.writeIDs[d.ID()] = struct{}{}
 	return nil
 }
 
 func (b *MultiBatch) Delete(id string) {
+	abandonMedia(b.mediaIntents[id])
+	delete(b.mediaIntents, id)
 	oldHTMLKeys, oldFaviconKeys := b.indexer.getDocKeysByID(id)
 	delete(b.embeddingIDs, id)
 	b.deletedIDs[id] = struct{}{}
@@ -1802,6 +1857,12 @@ func (b *MultiBatch) Delete(id string) {
 // Discard releases pending blobs and clears staged operations. Call it when a
 // batch is abandoned before Save. The batch can be reused after Discard or Save.
 func (b *MultiBatch) Discard() {
+	for _, intent := range b.mediaIntents {
+		abandonMedia(intent)
+	}
+	clear(b.mediaIntents)
+	clear(b.mediaMoves)
+	clear(b.writeIDs)
 	for _, data := range b.pendingData {
 		data.release()
 	}
@@ -1818,8 +1879,35 @@ func (b *MultiBatch) Discard() {
 // A failure can leave some indexes committed; those references protect their blobs.
 func (b *MultiBatch) Save() error {
 	defer b.Discard()
+	ids := slices.AppendSeq(slices.Collect(maps.Keys(b.writeIDs)), maps.Keys(b.deletedIDs))
+	unlock := b.indexer.lockMediaDocuments(ids...)
+	defer unlock()
+	for _, intent := range b.mediaIntents {
+		if err := validateMediaIntent(intent); err != nil {
+			return err
+		}
+	}
+	if err := b.prepareMediaMoves(); err != nil {
+		return err
+	}
+	for id := range b.deletedIDs {
+		if _, moving := b.mediaMoves[id]; moving {
+			continue
+		}
+		if err := b.indexer.revokeMedia(id); err != nil {
+			return err
+		}
+	}
 	for _, entry := range b.batches {
 		if err := entry.index.Batch(entry.batch); err != nil {
+			return err
+		}
+	}
+	if err := b.finishMediaMoves(); err != nil {
+		return err
+	}
+	for _, intent := range b.mediaIntents {
+		if err := b.indexer.acceptMedia(intent); err != nil {
 			return err
 		}
 	}
@@ -1850,6 +1938,11 @@ func (b *MultiBatch) Save() error {
 }
 
 func (i *Indexer) Delete(id string) error {
+	unlock := i.lockMediaDocuments(id)
+	defer unlock()
+	if err := i.revokeMedia(id); err != nil {
+		return err
+	}
 	htmlKeys, faviconKeys := i.getDocKeysByID(id)
 	for _, idx := range i.indexes() {
 		if err := idx.Delete(id); err != nil {

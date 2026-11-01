@@ -32,6 +32,7 @@ type Override struct {
 
 // Source returns the active origin of a setting or collection member.
 func (c *Config) Source(path string) ValueSource {
+	path = canonicalExtractorSettingPath(strings.ToLower(path))
 	if path == "app.user_handling" && c.Server.ProxyAuthHeader != "" {
 		source := c.Source("server.proxy_auth_header")
 		source.Locked = true
@@ -84,7 +85,11 @@ func (inputs *configInputs) apply(overrides ...Override) error {
 		if value != nil {
 			value = cloneInputValue(reflect.ValueOf(value)).Interface()
 		}
-		if override.Path == "" {
+		path, value, err := normalizeExtractorAliasInput(override.Path, value)
+		if err != nil {
+			return err
+		}
+		if path == "" {
 			values, ok := value.(map[string]any)
 			if !ok {
 				return errors.New("configuration layer must be a mapping")
@@ -93,9 +98,9 @@ func (inputs *configInputs) apply(overrides ...Override) error {
 				return errors.New("invalid configuration mapping")
 			}
 		} else {
-			inputs.values.Set(override.Path, value)
+			inputs.values.Set(path, value)
 		}
-		inputs.record(strings.ToLower(override.Path), value, override.Source)
+		inputs.record(strings.ToLower(path), value, override.Source)
 	}
 	return nil
 }

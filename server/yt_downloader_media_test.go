@@ -3,7 +3,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,12 +13,11 @@ import (
 	"github.com/asciimoo/hister/config"
 	"github.com/asciimoo/hister/files"
 	"github.com/asciimoo/hister/server/document"
-	ytvideodownloader "github.com/asciimoo/hister/server/extractor/extractors/yt_video_downloader"
 	"github.com/asciimoo/hister/server/indexer"
 	"github.com/asciimoo/hister/server/testutil"
 )
 
-func TestServeYTVideoDownloaderMediaStreamsAttachedFile(t *testing.T) {
+func TestServeYTDownloaderMediaStreamsRegisteredFile(t *testing.T) {
 	cfg := testutil.Config(t)
 	cfg.App.Public = true
 	cfg.Server.Database = "file::memory:"
@@ -42,25 +40,24 @@ func TestServeYTVideoDownloaderMediaStreamsAttachedFile(t *testing.T) {
 	t.Cleanup(func() { idx.Close() })
 	handler := registerEndpoints(cfg, idx)
 
-	mediaJSON, err := json.Marshal(struct {
-		Video []string `json:"video"`
-		Audio []string `json:"audio"`
-	}{Video: []string{files.PathToFileURL(mediaPath)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sourceURL := "https://www.youtube.com/watch?v=abc123"
+	sourceURL := "https://www.youtube.com/watch?v=abcdefghijk"
 	if err := idx.Add(&document.Document{
 		URL:       sourceURL,
 		HTML:      "<html><body>video</body></html>",
 		Title:     "YouTube source",
 		Processed: true,
-		Metadata:  map[string]any{ytvideodownloader.MediaReferencesMetadataKey: string(mediaJSON)},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	id := document.GetDocID(0, sourceURL)
+	audioPath := testutil.WriteFile(t, outputDir, "clip.mp3", []byte("audio bytes"))
+	artifacts := testutil.SeedMediaPair(t, id, 0, mediaPath, audioPath)
+	for _, artifact := range artifacts {
+		if artifact.Role == "video" {
+			mediaPath = filepath.Join(artifact.StorageRoot, artifact.RelativePath)
+		}
+	}
 	requestURL := "/api/yt_video_downloader/media?document_id=" + url.QueryEscape(id) + "&uri=" + url.QueryEscape(files.PathToFileURL(mediaPath))
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, requestURL, nil))

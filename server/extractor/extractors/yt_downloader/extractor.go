@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package yt_video_downloader integrates Hister with the local downloader API.
-package yt_video_downloader
+// Package yt_downloader integrates Hister with the local downloader API.
+package yt_downloader
 
 import (
 	"bytes"
@@ -11,13 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	stdhtml "html"
 	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,21 +24,22 @@ import (
 
 	"github.com/asciimoo/hister/files"
 	"github.com/asciimoo/hister/server/extractor/sdk"
+	medialifecycle "github.com/asciimoo/hister/server/media"
 )
 
 const (
 	defaultBinary              = "yt_downloader"
 	defaultOutputDir           = "~/Videos/Hister/YouTube"
-	MediaReferencesMetadataKey = "yt_video_downloader_media"
+	MediaReferencesMetadataKey = "yt_downloader_media"
 	maxDiagnosticSize          = 64 << 10
 	maxManifestSize            = 1 << 20
 )
 
 const manifestUpgradeHint = "requires yt_downloader named-job --result-json support; upgrade tools--yt_downloader"
 
-// YTVideoDownloader downloads video and audio files without replacing the
+// YTDownloader downloads video and audio files without replacing the
 // document content extracted by Hister's normal content extractor chain.
-type YTVideoDownloader struct {
+type YTDownloader struct {
 	cfg               *sdk.Config
 	jobSlots          chan struct{}
 	downloadsMu       sync.Mutex
@@ -63,21 +62,21 @@ type downloadCall struct {
 }
 
 var (
-	_ sdk.Extractor        = (*YTVideoDownloader)(nil)
-	_ sdk.ContextExtractor = (*YTVideoDownloader)(nil)
+	_ sdk.Extractor        = (*YTDownloader)(nil)
+	_ sdk.ContextExtractor = (*YTDownloader)(nil)
 )
 
-func (e *YTVideoDownloader) Name() string { return "yt_video_downloader" }
+func (e *YTDownloader) Name() string { return "yt_downloader" }
 
-func (e *YTVideoDownloader) Description() string {
-	return "Downloads video and audio-only files; its preview shows their file URIs."
+func (e *YTDownloader) Description() string {
+	return "Queues video and audio downloads; its preview shows trusted status and ready playback links."
 }
 
-func (e *YTVideoDownloader) Capabilities() sdk.Capabilities {
+func (e *YTDownloader) Capabilities() sdk.Capabilities {
 	return sdk.Capabilities{Enrich: true, Preview: true}
 }
 
-func (e *YTVideoDownloader) GetConfig() *sdk.Config {
+func (e *YTDownloader) GetConfig() *sdk.Config {
 	if e.cfg != nil {
 		return e.cfg
 	}
@@ -94,7 +93,7 @@ func (e *YTVideoDownloader) GetConfig() *sdk.Config {
 	}
 }
 
-func (e *YTVideoDownloader) SetConfig(cfg *sdk.Config) error {
+func (e *YTDownloader) SetConfig(cfg *sdk.Config) error {
 	if cfg == nil {
 		return errors.New("configuration is nil")
 	}
@@ -168,7 +167,7 @@ func integerOption(value any, key string) (int, error) {
 	return 0, fmt.Errorf("%s must be an integer", key)
 }
 
-func (e *YTVideoDownloader) Match(d *sdk.Document) bool {
+func (e *YTDownloader) Match(d *sdk.Document) bool {
 	parsed, err := url.Parse(d.URL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return false
@@ -180,14 +179,14 @@ func (e *YTVideoDownloader) Match(d *sdk.Document) bool {
 	return strings.Trim(parsed.Path, "/") != "" || parsed.RawQuery != ""
 }
 
-func (e *YTVideoDownloader) Extract(d *sdk.Document) sdk.ExtractResult {
+func (e *YTDownloader) Extract(d *sdk.Document) sdk.ExtractResult {
 	return e.ExtractContext(context.Background(), d)
 }
 
 // ExtractContext is run in Hister's enrichment phase. A successful download
 // does not claim content extraction, so the later ytdlp/readability extractors
 // still populate the document and preview.
-func (e *YTVideoDownloader) ExtractContext(ctx context.Context, d *sdk.Document) sdk.ExtractResult {
+func (e *YTDownloader) ExtractContext(ctx context.Context, d *sdk.Document) sdk.ExtractResult {
 	if !e.GetConfig().Enable {
 		return sdk.ExtractFallback(nil)
 	}
@@ -195,6 +194,17 @@ func (e *YTVideoDownloader) ExtractContext(ctx context.Context, d *sdk.Document)
 	if err != nil {
 		return sdk.ExtractFallback(err)
 	}
+	if handled, err := medialifecycle.Stage(ctx, medialifecycle.Request{
+		URL: d.URL, UserID: d.UserID, Binary: options.binary, OutputRoot: options.outputRoot,
+		Backend: options.backend, Transcribe: options.transcribe, Timeout: options.timeout,
+	}); handled {
+		if err != nil {
+			return sdk.ExtractFallback(err)
+		}
+		return sdk.Extracted()
+	}
+	// Standalone extraction retains the producer-protocol client behavior.
+	// Indexing always supplies a stager and never publishes these references.
 	publicationKey, publicationID, finishPublication := e.beginPublication(d)
 	defer finishPublication()
 	media, err, joined := e.fetchSingleflight(ctx, d, options)
@@ -232,7 +242,7 @@ func (e *YTVideoDownloader) ExtractContext(ctx context.Context, d *sdk.Document)
 	return sdk.Extracted()
 }
 
-func (e *YTVideoDownloader) beginPublication(d *sdk.Document) (string, uint64, func()) {
+func (e *YTDownloader) beginPublication(d *sdk.Document) (string, uint64, func()) {
 	keyBytes, _ := json.Marshal(struct {
 		UserID     uint
 		DocumentID string
@@ -264,7 +274,7 @@ func (e *YTVideoDownloader) beginPublication(d *sdk.Document) (string, uint64, f
 	}
 }
 
-func (e *YTVideoDownloader) publishReferences(d *sdk.Document, key string, publicationID uint64, encoded string) (bool, error) {
+func (e *YTDownloader) publishReferences(d *sdk.Document, key string, publicationID uint64, encoded string) (bool, error) {
 	e.publicationMu.Lock()
 	defer e.publicationMu.Unlock()
 	state := e.publications[key]
@@ -310,7 +320,7 @@ type downloaderOptions struct {
 	timeout    int
 }
 
-func (e *YTVideoDownloader) downloaderOptions() (downloaderOptions, error) {
+func (e *YTDownloader) downloaderOptions() (downloaderOptions, error) {
 	cfg := e.GetConfig()
 	seconds, err := integerOptionDefault(cfg.Options, "timeout", 1800)
 	if err != nil {
@@ -325,72 +335,6 @@ func (e *YTVideoDownloader) downloaderOptions() (downloaderOptions, error) {
 	}, nil
 }
 
-// validMediaURI ensures preview links still point to regular files inside the
-// configured output directory, even if document metadata was edited or imported.
-func (e *YTVideoDownloader) validMediaURI(rawURI string) bool {
-	parsed, err := url.Parse(rawURI)
-	if err != nil || parsed.Scheme != "file" || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return false
-	}
-	outputDir := stringOption(e.GetConfig().Options, "output_dir", defaultOutputDir)
-	root, err := filepath.Abs(filepath.Clean(files.ExpandHome(outputDir)))
-	if err != nil {
-		return false
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return false
-	}
-	path, err := filepath.Abs(filepath.Clean(files.FileURLToPath(rawURI)))
-	if err != nil {
-		return false
-	}
-	path, err = filepath.EvalSymlinks(path)
-	if err != nil {
-		return false
-	}
-	relative, err := filepath.Rel(root, path)
-	if err != nil || relative == "." || !filepath.IsLocal(relative) {
-		return false
-	}
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
-}
-
-// ResolveMediaFile returns a downloaded media path only when the URI is
-// recorded on the source document and still resolves to a regular file under
-// outputDir. It is used by Hister's same-origin media-serving endpoint.
-func ResolveMediaFile(d *sdk.Document, rawURI, outputDir string) (string, error) {
-	if d == nil {
-		return "", errors.New("source document is missing")
-	}
-	encoded, ok := d.Metadata[MediaReferencesMetadataKey].(string)
-	if !ok {
-		return "", errors.New("source document has no downloaded media references")
-	}
-	var references mediaReferences
-	if err := json.Unmarshal([]byte(encoded), &references); err != nil {
-		return "", fmt.Errorf("decode downloaded media references: %w", err)
-	}
-	found := slices.Contains(append(references.Video, references.Audio...), rawURI)
-	if !found {
-		return "", errors.New("media URI is not attached to the source document")
-	}
-
-	extractor := &YTVideoDownloader{}
-	if outputDir != "" {
-		extractor.cfg = &sdk.Config{Options: map[string]any{"output_dir": outputDir}}
-	}
-	if !extractor.validMediaURI(rawURI) {
-		return "", errors.New("media URI is outside the configured output directory or unavailable")
-	}
-	path, err := filepath.EvalSymlinks(files.FileURLToPath(rawURI))
-	if err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
 type downloadSource struct {
 	documentID string
 	userID     uint
@@ -401,7 +345,7 @@ type downloadSource struct {
 // A leader owns a downloader process. A waiting caller may abandon its wait
 // without canceling the leader; if the leader is canceled, all waiters observe
 // that failure and a later request starts a fresh job.
-func (e *YTVideoDownloader) fetchSingleflight(ctx context.Context, d *sdk.Document, options downloaderOptions) (*downloadResult, error, bool) {
+func (e *YTDownloader) fetchSingleflight(ctx context.Context, d *sdk.Document, options downloaderOptions) (*downloadResult, error, bool) {
 	videoID, err := youtubeVideoID(d.URL)
 	if err != nil {
 		return nil, err, false
@@ -487,47 +431,18 @@ func validYouTubeVideoID(id string) bool {
 	return true
 }
 
-// Preview shows the local media file URIs recorded during enrichment.
-func (e *YTVideoDownloader) Preview(d *sdk.Document) sdk.PreviewResult {
-	var references mediaReferences
-	if raw, ok := d.Metadata[MediaReferencesMetadataKey].(string); ok {
-		_ = json.Unmarshal([]byte(raw), &references)
+// Preview reads server-owned state; submitted/imported metadata never creates
+// playback links. The frontend polls the scoped read-only API while active.
+func (e *YTDownloader) Preview(d *sdk.Document) sdk.PreviewResult {
+	status, err := medialifecycle.ReadStatus(d.ID(), d.UserID)
+	if err != nil {
+		return sdk.Previewed(sdk.PreviewResponse{Content: "<p>Media status is unavailable. No download readiness could be verified.</p>"})
 	}
-
-	validURIs := func(uris []string) []string {
-		valid := make([]string, 0, len(uris))
-		for _, uri := range uris {
-			if e.validMediaURI(uri) {
-				valid = append(valid, uri)
-			}
-		}
-		return valid
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		return sdk.PreviewFallback(err)
 	}
-	references.Video = validURIs(references.Video)
-	references.Audio = validURIs(references.Audio)
-
-	var content strings.Builder
-	content.WriteString("<h2>Downloaded media</h2>")
-	if len(references.Video) == 0 && len(references.Audio) == 0 {
-		content.WriteString("<p>No downloaded media file URIs are recorded yet. Re-index this YouTube page to refresh them.</p>")
-		return sdk.Previewed(sdk.PreviewResponse{Content: content.String()})
-	}
-	for _, group := range []struct {
-		label string
-		uris  []string
-	}{{"Video", references.Video}, {"Audio", references.Audio}} {
-		for _, uri := range group.uris {
-			escapedURI := stdhtml.EscapeString(uri)
-			if d.DocumentID == "" {
-				fmt.Fprintf(&content, "<p><strong>%s</strong><br><code>%s</code></p>", group.label, escapedURI)
-				continue
-			}
-			query := url.Values{"document_id": {d.DocumentID}, "uri": {uri}}
-			href := stdhtml.EscapeString("api/yt_video_downloader/media?" + query.Encode())
-			fmt.Fprintf(&content, `<p><strong>%s</strong><br><a href="%s" target="_blank" rel="noopener noreferrer">%s</a></p>`, group.label, href, escapedURI)
-		}
-	}
-	return sdk.Previewed(sdk.PreviewResponse{Content: content.String()})
+	return sdk.Previewed(sdk.PreviewResponse{Template: "yt_downloader", Content: string(encoded)})
 }
 
 type downloadResult struct {
@@ -567,7 +482,7 @@ type downloaderManifest struct {
 	} `json:"error"`
 }
 
-func (e *YTVideoDownloader) fetch(parent context.Context, source downloadSource, options downloaderOptions) (*downloadResult, error) {
+func (e *YTDownloader) fetch(parent context.Context, source downloadSource, options downloaderOptions) (*downloadResult, error) {
 	ctx, cancel := context.WithTimeout(parent, time.Duration(options.timeout)*time.Second)
 	defer cancel()
 
@@ -595,6 +510,10 @@ func (e *YTVideoDownloader) fetch(parent context.Context, source downloadSource,
 }
 
 func runDownloaderInvocation(ctx context.Context, source downloadSource, options downloaderOptions, command, jobType string) (*downloaderManifest, error) {
+	return runDownloaderInvocationWithEvents(ctx, source, options, command, jobType, nil, nil, nil)
+}
+
+func runDownloaderInvocationWithEvents(ctx context.Context, source downloadSource, options downloaderOptions, command, jobType string, prepared func(string) error, started, completed func() error) (*downloaderManifest, error) {
 	invocation, err := newDownloaderInvocation(ctx, source, options, jobType)
 	if err != nil {
 		return nil, err
@@ -620,19 +539,29 @@ func runDownloaderInvocation(ctx context.Context, source downloadSource, options
 			"--transcript-langs", "en,en-orig", "--transcript-format", "vtt",
 		)
 	}
-	if _, err := runDownloaderCommand(ctx, options.binary, args...); err != nil {
+	if prepared != nil {
+		if err := prepared(invocation.jobID); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := runDownloaderCommandWithStart(ctx, options.binary, started, args...); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if completed != nil {
+		if err := completed(); err != nil {
+			return nil, err
+		}
+	}
 	manifestBytes, err := readResultManifest(invocation.resultFile)
 	if err != nil {
-		return nil, fmt.Errorf("yt_downloader did not publish a usable result manifest (%s): %w", manifestUpgradeHint, err)
+		return nil, fmt.Errorf("%w: yt_downloader did not publish a usable result manifest (%s): %w", medialifecycle.ErrInvalidOutput, manifestUpgradeHint, err)
 	}
 	manifest, mediaPaths, transcriptPaths, err := validateResultManifest(manifestBytes, invocation)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", medialifecycle.ErrInvalidOutput, err)
 	}
 	manifest.MediaPaths = mediaPaths
 	manifest.TranscriptPaths = transcriptPaths
@@ -727,6 +656,7 @@ func downloaderStateRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Preserve the existing cache/report location across the integration rename.
 	root := filepath.Join(cacheRoot, "hister", "yt_video_downloader")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
@@ -757,6 +687,10 @@ func newJobID(jobType string) (string, error) {
 }
 
 func runDownloaderCommand(ctx context.Context, binary string, args ...string) (string, error) {
+	return runDownloaderCommandWithStart(ctx, binary, nil, args...)
+}
+
+func runDownloaderCommandWithStart(ctx context.Context, binary string, started func() error, args ...string) (string, error) {
 	var stdout cappedBuffer
 	stdout.limit = maxDiagnosticSize
 	var stderr cappedBuffer
@@ -765,7 +699,18 @@ func runDownloaderCommand(ctx context.Context, binary string, args ...string) (s
 	configureDownloaderProcess(cmd)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Start()
+	if err == nil {
+		if started != nil {
+			if startErr := started(); startErr != nil {
+				_ = cmd.Cancel()
+				_ = cmd.Wait()
+				return "", startErr
+			}
+		}
+		err = cmd.Wait()
+	}
+	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
@@ -987,7 +932,7 @@ func consumeJSONValue(decoder *json.Decoder) error {
 	return nil
 }
 
-func (e *YTVideoDownloader) runJob(ctx context.Context, run func() error) error {
+func (e *YTDownloader) runJob(ctx context.Context, run func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

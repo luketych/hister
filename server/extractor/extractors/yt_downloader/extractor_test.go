@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package yt_video_downloader
+package yt_downloader
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	stdhtml "html"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -83,12 +81,12 @@ printf '{"schema_version":1,"job_id":"%s","job_type":"%s","url":"%s","video_id":
 `
 }
 
-func configuredExtractorWithOutput(t *testing.T, binary, outputDir string) *YTVideoDownloader {
+func configuredExtractorWithOutput(t *testing.T, binary, outputDir string) *YTDownloader {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	e := &YTVideoDownloader{}
+	e := &YTDownloader{}
 	if err := e.SetConfig(&config.Extractor{
 		Enable: true,
 		Options: map[string]any{
@@ -103,13 +101,13 @@ func configuredExtractorWithOutput(t *testing.T, binary, outputDir string) *YTVi
 	return e
 }
 
-func configuredExtractor(t *testing.T, binary string) *YTVideoDownloader {
+func configuredExtractor(t *testing.T, binary string) *YTDownloader {
 	t.Helper()
 	return configuredExtractorWithOutput(t, binary, filepath.Join(t.TempDir(), "media"))
 }
 
 func TestMatchYouTubeOnlyAndSupportedVideoIDs(t *testing.T) {
-	e := &YTVideoDownloader{}
+	e := &YTDownloader{}
 	for _, testCase := range []struct {
 		url   string
 		match bool
@@ -151,7 +149,7 @@ func TestMatchYouTubeOnlyAndSupportedVideoIDs(t *testing.T) {
 }
 
 func TestExtractorIsEnricherAndPreviewer(t *testing.T) {
-	e := &YTVideoDownloader{}
+	e := &YTDownloader{}
 	defaults := e.GetConfig()
 	if defaults.Options["binary"] != "yt_downloader" {
 		t.Fatalf("default binary = %#v, want command name yt_downloader", defaults.Options["binary"])
@@ -165,7 +163,7 @@ func TestExtractorIsEnricherAndPreviewer(t *testing.T) {
 	if defaults.Options["transcribe"] != false {
 		t.Fatalf("default transcribe option = %#v, want false", defaults.Options["transcribe"])
 	}
-	if e.Name() != "yt_video_downloader" {
+	if e.Name() != "yt_downloader" {
 		t.Fatalf("extractor name = %q", e.Name())
 	}
 	capabilities := e.Capabilities()
@@ -228,7 +226,7 @@ func TestExtractPreservesContentAndStoresValidatedMedia(t *testing.T) {
 	}
 }
 
-func TestExtractStoresMediaURIsForPreviewAndEndpoint(t *testing.T) {
+func TestStandaloneExtractionCannotGrantPreviewPlayback(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "media")
 	binary := fakeDownloader(t, fakeDownloaderScript("", "audio"))
 	e := configuredExtractorWithOutput(t, binary, outputDir)
@@ -258,17 +256,8 @@ func TestExtractStoresMediaURIsForPreviewAndEndpoint(t *testing.T) {
 		t.Fatalf("Preview() = %v, %v", decision, err)
 	}
 	for _, uri := range append(references.Video, references.Audio...) {
-		query := url.Values{"document_id": {source.DocumentID}, "uri": {uri}}
-		link := `<a href="api/yt_video_downloader/media?` + stdhtml.EscapeString(query.Encode()) + `" target="_blank" rel="noopener noreferrer">` + stdhtml.EscapeString(uri) + `</a>`
-		if !strings.Contains(preview.Content, link) {
-			t.Errorf("preview %q does not make URI clickable: %q", preview.Content, link)
-		}
-		resolvedPath, err := filepath.EvalSymlinks(files.FileURLToPath(uri))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, err := ResolveMediaFile(source, uri, outputDir); err != nil || got != resolvedPath {
-			t.Errorf("ResolveMediaFile() = %q, %v; want %q", got, err, resolvedPath)
+		if strings.Contains(preview.Content, uri) || strings.Contains(preview.Content, "<a ") {
+			t.Fatalf("standalone metadata manufactured playback: %q", preview.Content)
 		}
 	}
 }
@@ -296,7 +285,7 @@ func TestFailedAudioPreservesExistingMetadataAndContent(t *testing.T) {
 }
 
 func TestOlderCompletionCannotReplaceNewerAcceptedReferences(t *testing.T) {
-	e := &YTVideoDownloader{}
+	e := &YTDownloader{}
 	newDoc := &document.Document{URL: "https://www.youtube.com/watch?v=" + testVideoID, UserID: 9, DocumentID: "stable-doc"}
 	oldDoc := &document.Document{URL: newDoc.URL, UserID: newDoc.UserID, DocumentID: newDoc.DocumentID}
 	key, olderID, finishOlder := e.beginPublication(oldDoc)
@@ -709,7 +698,7 @@ func TestExtractorFallsBackForUnsupportedVideoPage(t *testing.T) {
 
 func TestDisabledExtractorFallsBackWithoutLaunchingDownloader(t *testing.T) {
 	binary := fakeDownloader(t, "echo should-not-run >&2; exit 23")
-	e := &YTVideoDownloader{}
+	e := &YTDownloader{}
 	if err := e.SetConfig(&config.Extractor{Enable: false, Options: map[string]any{"binary": binary}}); err != nil {
 		t.Fatal(err)
 	}

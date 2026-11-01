@@ -1,6 +1,6 @@
 //go:build live
 
-package yt_video_downloader
+package yt_downloader
 
 import (
 	"context"
@@ -38,7 +38,7 @@ func TestLiveDownloadRealYouTubeVideo(t *testing.T) {
 	if _, err := os.Stat(binary); err != nil {
 		t.Fatalf("step 2/6: downloader binary %q is unavailable: %v", binary, err)
 	}
-	e := &YTVideoDownloader{}
+	e := &YTDownloader{}
 	if err := e.SetConfig(&config.Extractor{
 		Enable: true,
 		Options: map[string]any{
