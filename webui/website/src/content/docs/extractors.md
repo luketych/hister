@@ -516,11 +516,88 @@ pairing or current selection. Incomplete, mismatched, unsafe or unsupported
 reports are blocked. Unknown historical formats are not silently upgraded.
 
 The inventory does not check the live source document, its owner/incarnation,
-or existing registry registrations. Explicit owner/pair approval, current-source
-checks, idempotent registration and revalidation at application time remain
-separate pending work. This command alone does **not** repair Greenpath or any
-other historical playback links. Retain the files and evidence; do not treat
-this JSON as an authorization manifest.
+or existing registry registrations. It cannot authorize media or repair
+Greenpath or any other historical playback links. Retain the files and evidence;
+do not treat this inventory JSON as an authorization manifest.
+
+#### Historical approval document and guarded registration
+
+An explicitly reviewed approval maps one exact video/audio pair to an **existing
+live source incarnation**. It cannot establish a missing source, infer its owner
+from reports, replace the current selection, or start a download. This is the
+version-1 shape; placeholders below are deliberately not valid digests:
+
+```json
+{
+  "schema_version": 1,
+  "approval_id": "reviewed-pair-unique-id",
+  "action": "retain_history",
+  "source": {
+    "source_id": "CURRENT_REGISTRY_SOURCE_ID",
+    "document_id": "https://www.youtube.com/watch?v=abcdefghijk",
+    "owner_id": 0,
+    "url": "https://www.youtube.com/watch?v=abcdefghijk"
+  },
+  "video": {
+    "job_id": "hister-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-video",
+    "evidence_sha256": "<64 lowercase hex digits from the reviewed inventory>",
+    "media_sha256": "<64 lowercase hex digits for the reviewed video bytes>"
+  },
+  "audio": {
+    "job_id": "hister-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-audio",
+    "evidence_sha256": "<64 lowercase hex digits from the reviewed inventory>",
+    "media_sha256": "<64 lowercase hex digits for the reviewed audio bytes>"
+  }
+}
+```
+
+- `owner_id` must be explicit, including zero for a shared source. Omitted/null
+  ownership is rejected. For a nonzero owner, `document_id` is the normal
+  `<owner-id>:<exact-source-url>` identity. The registry source ID pins the
+  incarnation; deletion/re-add cannot silently reuse an old approval.
+- Field names are exact and case-sensitive. Duplicate, case-variant, unknown,
+  oversized and multi-value JSON documents are rejected. Only `retain_history`
+  is supported; `approval_id` uses 1–120 ASCII letters, digits, hyphens or
+  underscores. No actor, executable, filesystem path or downloader option comes
+  from approval JSON. During check/apply the server uses its configured media
+  output directory and its fixed local `yt_video_downloader` state directory;
+  clients cannot choose filesystem roots.
+- The approval is **not an administrator credential**. The internal indexer
+  service separately requires a verified admin actor (or trusted local admin
+  authority in single-user mode) and rechecks the actual indexed source/owner
+  and live, unsuspended registry binding under the source commit coordinator.
+- Revalidation reads the named reports again and compares their evidence digests.
+  Both actual media files are safely opened and hashed against `media_sha256`,
+  rejecting even same-size replacements. Descriptor identity, size and mtime are
+  rechecked at the commit boundary. Hashing runs outside the short source lock.
+- One SQL transaction records the immutable approval/audit actor, historical set,
+  artifacts and bookkeeping attempt. It never changes the selected set or latest
+  download status. The approval ID is a durable idempotency key: exact replay
+  returns the original IDs; changed approval/binding/locations conflict. Previously
+  registered jobs cannot be adopted, and retired artifacts are never revived.
+  Replays still require current binding/evidence checks; unavailable files may
+  therefore fail safely even when an audit receipt already exists.
+
+Use the configured server URL and an administrator token in multi-user mode.
+First run a read-only server preflight, review the returned confirmation hash,
+then explicitly apply that exact plan:
+
+```bash
+hister media check --approval reviewed-history.json
+hister media apply --approval reviewed-history.json \
+  --confirmation <confirmation_sha256> --yes
+```
+
+`media check` validates the live source, ownership, evidence/media hashes and
+registry conflicts without creating SQL rows. `media apply` repeats those
+checks and requires the exact 64-character hash from the check plus `--yes`.
+The hash is a stale-plan guard, **not** a reservation or credential; another
+writer may win before apply. Exact replay is harmless and reports the original
+receipt. Keep the server media and cache roots under trusted operator control.
+SQL and media files do not share a transaction: descriptor checks do not lock
+out external filesystem writers, and serving does not re-hash approval bytes on
+every read. Tests use synthetic disposable fixtures; no live historical import
+is performed by the test suite.
 
 #### Retry and cancel commands
 

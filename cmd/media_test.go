@@ -62,6 +62,29 @@ func TestMediaReconcileIsDryRunWithoutRuntimeInitialization(t *testing.T) {
 	}
 }
 
+func TestMediaHistoryCommandsRequireExplicitApprovalAndConfirmation(t *testing.T) {
+	root := t.TempDir()
+	approvalPath := filepath.Join(root, "approval.json")
+	if err := os.WriteFile(approvalPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"check"},
+		{"apply"},
+		{"apply", "--approval", approvalPath, "--confirmation", strings.Repeat("a", 64)},
+		{"apply", "--approval", approvalPath, "--confirmation", strings.Repeat("a", 64), "--yes"},
+	} {
+		command := newMediaCommand()
+		var out bytes.Buffer
+		command.SetOut(&out)
+		command.SetErr(&out)
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil {
+			t.Fatalf("accepted incomplete or unreviewable history command: %v", args)
+		}
+	}
+}
+
 func TestMediaReconcileRejectsApplyAndUnscopedInputs(t *testing.T) {
 	for _, args := range [][]string{
 		{"reconcile"},

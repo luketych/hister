@@ -94,7 +94,7 @@ func RetryMediaAttempt(scope MediaScope, id, requestJSON string) (*MediaRetryRes
 			return err
 		}
 		var latest MediaAttempt
-		if err := tx.Where("source_id = ? AND state <> ? AND error_code <> ?", source.ID, MediaPendingCommit, "coalesced").Order("CASE WHEN publication_generation > generation THEN publication_generation ELSE generation END DESC").First(&latest).Error; err != nil {
+		if err := tx.Where("source_id = ? AND state NOT IN ? AND error_code <> ?", source.ID, []string{MediaPendingCommit, MediaHistorical}, "coalesced").Order("CASE WHEN publication_generation > generation THEN publication_generation ELSE generation END DESC").First(&latest).Error; err != nil {
 			return err
 		}
 		if latest.ID != previous.ID {

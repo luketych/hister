@@ -146,6 +146,7 @@ func automigrate() error {
 		&MediaAttempt{},
 		&MediaSet{},
 		&MediaArtifact{},
+		&MediaHistoryReceipt{},
 	)
 }
 

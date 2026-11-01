@@ -39,7 +39,11 @@ func configureCommandScopes() {
 	setCommandScope(configValidateCmd, executionScopeLocal, "server-url", "token", "search-url")
 	setCommandScope(mediaCmd, executionScopeLocal)
 	for _, cmd := range mediaCmd.Commands() {
-		setCommandScope(cmd, executionScopeLocal)
+		if cmd.Name() == "check" || cmd.Name() == "apply" {
+			setCommandScope(cmd, executionScopeRemote, "client-timeout")
+		} else {
+			setCommandScope(cmd, executionScopeLocal)
+		}
 	}
 	setCommandScope(doctorCmd, executionScopeHybrid, "client-timeout", "search-url")
 	setCommandScope(listURLsCmd, executionScopeHybrid)
