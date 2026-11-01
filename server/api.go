@@ -1020,6 +1020,32 @@ func init() {
 			},
 		},
 		{
+			Name:         "Retry YouTube download",
+			Path:         "/api/yt_downloader/retry",
+			Method:       POST,
+			CSRFRequired: true,
+			BodyLimit:    mediaCommandBodyLimit,
+			Handler:      serveMediaRetry,
+			Description:  "Retry the latest failed, cancelled or interrupted attempt using current server settings, without re-indexing or replacing an older ready selection. Requires source mutation permission (owner or admin, not shared read access). Returns 202 with the actual accepted attempt ID, or 200 for an idempotent replay of the same terminal attempt; replay never creates more work. Current caller URL rules apply unless the source has a saved manual override. Read status for available artifacts.",
+			JSONSchema: []*JSONSchemaField{
+				{Name: "document_id", Type: "string", Required: true, Description: "Committed source document ID"},
+				{Name: "attempt_id", Type: "string", Required: true, Description: "Terminal attempt being retried; also the durable idempotency key"},
+			},
+		},
+		{
+			Name:         "Cancel YouTube download",
+			Path:         "/api/yt_downloader/cancel",
+			Method:       POST,
+			CSRFRequired: true,
+			BodyLimit:    mediaCommandBodyLimit,
+			Handler:      serveMediaCancel,
+			Description:  "Fence publication and cancel exactly the named accepted attempt. Requires source mutation permission (owner or admin). Repeated cancellation is harmless; it cannot cancel a later retry. Returns 409 if publication or another terminal outcome already won. Existing ready artifacts are retained. Submission owner/public headers do not change command scope.",
+			JSONSchema: []*JSONSchemaField{
+				{Name: "document_id", Type: "string", Required: true, Description: "Committed source document ID"},
+				{Name: "attempt_id", Type: "string", Required: true, Description: "Exact queued, starting, downloading or finalizing attempt to cancel"},
+			},
+		},
+		{
 			Name:         "YouTube media status",
 			Path:         "/api/yt_downloader/status",
 			Method:       GET,
