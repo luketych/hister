@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,9 @@ func failedCommandAttempt(t *testing.T, documentID string, owner uint) *model.Me
 
 func mediaCommandServer(t *testing.T, script string) *mediaCommandFixture {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("media command fixture executes POSIX shell scripts; Windows subprocess fixture is not available")
+	}
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	cfg := testutil.Config(t)
@@ -372,6 +376,9 @@ func TestMediaCommandsReadyOutcomeWinsAndForeignSuspensionIsNotLeaked(t *testing
 }
 
 func TestMediaCommandsSingleUserWriteModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("single-user retry fixture executes a POSIX shell downloader")
+	}
 	for _, token := range []string{"", "test-token"} {
 		t.Run(map[bool]string{true: "token", false: "local private"}[token != ""], func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())

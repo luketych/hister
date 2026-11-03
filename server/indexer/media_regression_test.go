@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +67,9 @@ printf '{"schema_version":1,"job_id":"%s","job_type":"%s","url":"%s","video_id":
 
 func mediaIndexer(t *testing.T, script string, content *mediaContentExtractor, names ...string) (*Indexer, string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("media indexer fixture executes a POSIX shell downloader; Windows subprocess fixture is not available")
+	}
 	name := config.YTDownloaderName
 	if len(names) > 0 {
 		name = names[0]

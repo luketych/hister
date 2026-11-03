@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,9 @@ const testVideoID = "abcdefghijk"
 
 func fakeDownloader(t *testing.T, script string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake downloader uses a POSIX shell script; Windows subprocess fixture is not available")
+	}
 	path := filepath.Join(t.TempDir(), "fake-yt-downloader")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
 		t.Fatal(err)

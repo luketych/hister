@@ -55,7 +55,7 @@ func TestYTDownloaderAliasesInitializeOneCanonicalExtractor(t *testing.T) {
 					t.Fatalf("alias preview failed or invented playback: %#v, %v", preview, err)
 				}
 			}
-			for _, field := range r.ConfigurationFields() {
+			for _, field := range r.ConfigurationFields(nil) {
 				if strings.Contains(field.Path, config.LegacyYTDownloaderName) {
 					t.Fatalf("catalog emitted legacy name: %#v", field)
 				}
