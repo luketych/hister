@@ -4,6 +4,8 @@ package model_test
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -12,12 +14,13 @@ import (
 )
 
 func historyInput(source *model.MediaSource) model.MediaHistoryInput {
+	root := filepath.Join(os.TempDir(), "hister-media-history-test")
 	return model.MediaHistoryInput{
 		ApprovalID: "approval-1", SourceID: source.ID, DocumentID: source.DocumentID,
 		UserID: source.UserID, ApprovedBy: 91, ApprovalJSON: `{"version":1}`,
 		Pair: []model.MediaArtifactInput{
-			{Role: model.MediaVideo, JobID: "history-video", StorageRoot: "/media", RelativePath: "old/video.webm", Size: 100, ContentType: "video/webm"},
-			{Role: model.MediaAudio, JobID: "history-audio", StorageRoot: "/media", RelativePath: "old/audio.mp3", Size: 50, ContentType: "audio/mpeg"},
+			{Role: model.MediaVideo, JobID: "history-video", StorageRoot: root, RelativePath: filepath.Join("old", "video.webm"), Size: 100, ContentType: "video/webm"},
+			{Role: model.MediaAudio, JobID: "history-audio", StorageRoot: root, RelativePath: filepath.Join("old", "audio.mp3"), Size: 50, ContentType: "audio/mpeg"},
 		},
 	}
 }

@@ -35,11 +35,11 @@ func TestOpenArtifactDistinguishesMissingFromInvalidFiles(t *testing.T) {
 		want error
 	}{
 		{"missing.webm", 5, os.ErrNotExist},
-		{"missing-dir/video.webm", 5, os.ErrNotExist},
+		{filepath.Join("missing-dir", "video.webm"), 5, os.ErrNotExist},
 		{"symlink.webm", 5, media.ErrInvalidOutput},
-		{"symlink-dir/valid.webm", 5, media.ErrInvalidOutput},
+		{filepath.Join("symlink-dir", "valid.webm"), 5, media.ErrInvalidOutput},
 		{"directory.webm", 5, media.ErrInvalidOutput},
-		{"../valid.webm", 5, media.ErrInvalidOutput},
+		{filepath.Join("..", "valid.webm"), 5, media.ErrInvalidOutput},
 		{"valid.webm", 6, media.ErrInvalidOutput},
 	} {
 		t.Run(test.path, func(t *testing.T) {

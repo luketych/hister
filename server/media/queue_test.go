@@ -23,6 +23,13 @@ func queueDatabase(t *testing.T) string {
 	cfg := testutil.Config(t)
 	cfg.Server.Database = "queue.sqlite3"
 	testutil.InitModelWithConfig(t, cfg)
+	db, err := model.DB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SQLite permits one writer at a time. Keep queue-level goroutine tests
+	// deterministic across platforms; model-level writer tests opt into a pool.
+	db.SetMaxOpenConns(1)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

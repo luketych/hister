@@ -20,7 +20,7 @@ import (
 func TestServeYTDownloaderMediaStreamsRegisteredFile(t *testing.T) {
 	cfg := testutil.Config(t)
 	cfg.App.Public = true
-	cfg.Server.Database = "file::memory:"
+	cfg.Server.Database = "media.sqlite3"
 	outputDir := t.TempDir()
 	mediaPath := testutil.WriteFile(t, outputDir, "clip.webm", []byte("video bytes"))
 	cfg.Extractors = map[string]*config.Extractor{

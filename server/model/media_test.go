@@ -5,6 +5,8 @@ package model_test
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -62,9 +64,10 @@ func finalizeMedia(t *testing.T, attempt *model.MediaAttempt) *model.MediaAttemp
 }
 
 func mediaPair(attempt *model.MediaAttempt) []model.MediaArtifactInput {
+	root := filepath.Join(os.TempDir(), "hister-media-test")
 	return []model.MediaArtifactInput{
-		{Role: model.MediaVideo, JobID: attempt.ID + "-video", StorageRoot: "/media", RelativePath: attempt.ID + "/video.webm", Size: 100, ContentType: "video/webm"},
-		{Role: model.MediaAudio, JobID: attempt.ID + "-audio", StorageRoot: "/media", RelativePath: attempt.ID + "/audio.mp3", Size: 50, ContentType: "audio/mpeg"},
+		{Role: model.MediaVideo, JobID: attempt.ID + "-video", StorageRoot: root, RelativePath: filepath.Join(attempt.ID, "video.webm"), Size: 100, ContentType: "video/webm"},
+		{Role: model.MediaAudio, JobID: attempt.ID + "-audio", StorageRoot: root, RelativePath: filepath.Join(attempt.ID, "audio.mp3"), Size: 50, ContentType: "audio/mpeg"},
 	}
 }
 
