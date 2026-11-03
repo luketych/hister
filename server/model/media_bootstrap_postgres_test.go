@@ -105,6 +105,16 @@ func TestMediaRetentionPostgresRetiresOnlyHistoricalArtifacts(t *testing.T) {
 	oldPair := testutil.SeedMediaPair(t, "postgres-retention", 41, oldVideo, oldAudio)
 	newVideo, newAudio := writePair("new")
 	currentPair := testutil.SeedMediaPair(t, "postgres-retention", 41, newVideo, newAudio)
+	if len(oldPair) != 2 || len(currentPair) != 2 || oldPair[0].SetID == currentPair[0].SetID {
+		t.Fatalf("fixture pairs: old=%#v current=%#v; want two distinct pairs", oldPair, currentPair)
+	}
+	source, err := model.EnsureMediaSource("postgres-retention", 41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.DB.Model(&model.MediaSource{}).Where("id = ?", source.ID).Update("selected_set_id", currentPair[0].SetID).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	before := time.Now().UTC().Add(-24 * time.Hour)
 	oldSetCreatedAt := before.Add(-24 * time.Hour)
@@ -154,9 +164,6 @@ func TestMediaRetentionPostgresRetiresOnlyHistoricalArtifacts(t *testing.T) {
 	if len(remaining.Artifacts) != 0 || remaining.SelectedArtifactsExcluded != 2 {
 		t.Fatalf("PostgreSQL retention after cleanup = %#v; want only selected artifacts excluded", remaining)
 	}
-	if len(currentPair) != 2 {
-		t.Fatalf("fixture current pair has %d artifacts, want two", len(currentPair))
-	}
 }
 
 func TestMediaSourceBootstrapPostgresSerializesApplyAndRejectsStalePlans(t *testing.T) {
@@ -196,13 +203,11 @@ func TestMediaSourceBootstrapPostgresSerializesApplyAndRejectsStalePlans(t *test
 	results := make(chan applyResult, 2)
 	var workers sync.WaitGroup
 	for range 2 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			<-start
 			result, err := model.ApplyMediaSourceBootstrap(input, checked.ConfirmationSHA256)
 			results <- applyResult{result: result, err: err}
-		}()
+		})
 	}
 	close(start)
 	workers.Wait()

@@ -208,7 +208,9 @@ func TestMediaOlderIndexCommitCannotReplaceNewerSelection(t *testing.T) {
 	newerErr := idx.AddContext(context.Background(), &document.Document{URL: mediaSourceURL, Title: "newer", HTML: "<p>newer</p>"})
 	if newerErr != nil {
 		releaseOlder()
-		<-done
+		if olderErr := <-done; olderErr != nil {
+			t.Errorf("older write after newer failure: %v", olderErr)
+		}
 		t.Fatal(newerErr)
 	}
 	waitMedia(t, 2, model.MediaReady)

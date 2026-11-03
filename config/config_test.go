@@ -523,6 +523,27 @@ func TestConfigurationSourcesIgnoreEmptyContainers(t *testing.T) {
 	}
 }
 
+func TestCompileSensitiveContentPatternsIsStableAndValidatesEntries(t *testing.T) {
+	cfg := CreateDefaultConfig()
+	for range 25 {
+		if _, err := cfg.CompileSensitiveContentPatterns(); err != nil {
+			t.Fatalf("compile defaults: %v", err)
+		}
+	}
+	cfg.SensitiveContentPatterns["broken"] = "["
+	if _, err := cfg.CompileSensitiveContentPatterns(); err == nil {
+		t.Fatal("accepted an invalid sensitive content pattern")
+	}
+	if err := CreateDefaultConfig().Validate(); err != nil {
+		t.Fatalf("validate defaults: %v", err)
+	}
+	invalid := CreateDefaultConfig()
+	invalid.SensitiveContentPatterns["broken"] = "["
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("configuration validation accepted an invalid sensitive content pattern")
+	}
+}
+
 func TestConfigurationSourcesPreservePartialMaps(t *testing.T) {
 	filename := filepath.Join(t.TempDir(), "config.yml")
 	const raw = "hotkeys:\n  web:\n    alt+x: focus_search_input\nsensitive_content_patterns:\n  custom: private\n"

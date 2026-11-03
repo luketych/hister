@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -757,9 +758,7 @@ func manifestFor(t *testing.T, invocation *downloaderInvocation, mediaPaths []st
 		"error":            nil,
 		"future_field":     map[string]any{"additive": true},
 	}
-	for key, replacement := range changes {
-		value[key] = replacement
-	}
+	maps.Copy(value, changes)
 	data, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)

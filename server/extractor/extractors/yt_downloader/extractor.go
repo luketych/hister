@@ -424,7 +424,12 @@ func validYouTubeVideoID(id string) bool {
 		return false
 	}
 	for _, character := range id {
-		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-') {
+		switch {
+		case character >= 'a' && character <= 'z',
+			character >= 'A' && character <= 'Z',
+			character >= '0' && character <= '9',
+			character == '_' || character == '-':
+		default:
 			return false
 		}
 	}
@@ -582,7 +587,7 @@ func newDownloaderInvocation(ctx context.Context, source downloadSource, options
 	var artifactsRoot string
 	var resultFile string
 	var expectedOutputDir string
-	for attempts := 0; attempts < 3; attempts++ {
+	for range 3 {
 		jobID, err = newJobID(jobType)
 		if err != nil {
 			return nil, err
@@ -738,7 +743,7 @@ func readResultManifest(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	openedInfo, err := file.Stat()
 	if err != nil {
 		return nil, err
