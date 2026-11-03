@@ -54,7 +54,7 @@ func failedCommandAttempt(t *testing.T, documentID string, owner uint) *model.Me
 
 func mediaCommandServer(t *testing.T, script string) *mediaCommandFixture {
 	t.Helper()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" && script != "" {
 		t.Skip("media command fixture executes POSIX shell scripts; Windows subprocess fixture is not available")
 	}
 	t.Setenv("HOME", t.TempDir())
@@ -92,9 +92,17 @@ func mediaCommandServer(t *testing.T, script string) *mediaCommandFixture {
 	fixture.failed = failedCommandAttempt(t, id, owner.ID)
 	fixture.foreign = failedCommandAttempt(t, document.GetDocID(other.ID, commandSourceURL), other.ID)
 	fixture.global = failedCommandAttempt(t, commandSourceURL, 0)
-	binary := testutil.WriteFile(t, t.TempDir(), "downloader", []byte("#!/bin/sh\n"+script+"\n"))
-	if err := os.Chmod(binary, 0o755); err != nil {
-		t.Fatal(err)
+	var binary string
+	if script == "" {
+		// Request-only tests must not need a platform-specific executable. If a
+		// regression launches this placeholder, the resulting attempt is still
+		// observable in the registry assertions below.
+		binary = testutil.WriteFile(t, t.TempDir(), "must-not-execute", []byte("placeholder downloader\n"))
+	} else {
+		binary = testutil.WriteFile(t, t.TempDir(), "downloader", []byte("#!/bin/sh\n"+script+"\n"))
+		if err := os.Chmod(binary, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg.Extractors = map[string]*config.Extractor{config.YTDownloaderName: {Enable: true, Options: map[string]any{"binary": binary, "output_dir": filepath.Join(root, "new"), "timeout": 30}}}
 	fixture.idx = newServerTestIndexer(t, cfg)
@@ -232,7 +240,7 @@ func TestMediaCommandsCancelTargetsOnlyThatAttempt(t *testing.T) {
 }
 
 func TestMediaCommandsStrictBodyAndCSRF(t *testing.T) {
-	fixture := mediaCommandServer(t, "exit 1")
+	fixture := mediaCommandServer(t, "")
 	valid, err := json.Marshal(map[string]string{"document_id": fixture.documentID, "attempt_id": fixture.failed.ID})
 	if err != nil {
 		t.Fatal(err)
@@ -355,7 +363,7 @@ func TestMediaCommandsRespectDisabledDownloaderAndCurrentRules(t *testing.T) {
 }
 
 func TestMediaCommandsReadyOutcomeWinsAndForeignSuspensionIsNotLeaked(t *testing.T) {
-	fixture := mediaCommandServer(t, "exit 1")
+	fixture := mediaCommandServer(t, "")
 	var ready model.MediaAttempt
 	if err := model.DB.First(&ready, "source_id = ? AND state = ?", fixture.failed.SourceID, model.MediaReady).Error; err != nil {
 		t.Fatal(err)
@@ -372,6 +380,10 @@ func TestMediaCommandsReadyOutcomeWinsAndForeignSuspensionIsNotLeaked(t *testing
 		if rec := commandPost(t, fixture, action, fixture.documentID, fixture.foreign.ID, fixture.owner); rec.Code != http.StatusNotFound {
 			t.Fatalf("foreign suspended attempt leaked via %s: %d %s", action, rec.Code, rec.Body)
 		}
+	}
+	var count int64
+	if err := model.DB.Model(&model.MediaAttempt{}).Count(&count).Error; err != nil || count != 4 {
+		t.Fatalf("completed/foreign attempts accepted work: count=%d, error=%v", count, err)
 	}
 }
 
@@ -468,7 +480,7 @@ func waitCommandAttempt(t *testing.T, id, state string) {
 }
 
 func TestMediaCommandsRejectReadAccessAsMutationAuthority(t *testing.T) {
-	fixture := mediaCommandServer(t, "sleep 30")
+	fixture := mediaCommandServer(t, "")
 	for _, action := range []string{"retry", "cancel"} {
 		for _, test := range []struct {
 			name, docID, attemptID string
