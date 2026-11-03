@@ -108,18 +108,20 @@ func TestMediaRetentionPostgresRetiresOnlyHistoricalArtifacts(t *testing.T) {
 	if len(oldPair) != 2 || len(currentPair) != 2 || oldPair[0].SetID == currentPair[0].SetID {
 		t.Fatalf("fixture pairs: old=%#v current=%#v; want two distinct pairs", oldPair, currentPair)
 	}
-	source, err := model.EnsureMediaSource("postgres-retention", 41)
+	source, err := model.GetMediaSource("postgres-retention")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := model.DB.Model(&model.MediaSource{}).Where("id = ?", source.ID).Update("selected_set_id", currentPair[0].SetID).Error; err != nil {
-		t.Fatal(err)
+	if source.SelectedSetID != currentPair[0].SetID {
+		t.Fatalf("SeedMediaPair selected set = %q, want naturally published set %q", source.SelectedSetID, currentPair[0].SetID)
 	}
 
 	before := time.Now().UTC().Add(-24 * time.Hour)
-	oldSetCreatedAt := before.Add(-24 * time.Hour)
-	if err := model.DB.Model(&model.MediaSet{}).Where("id = ?", oldPair[0].SetID).Update("created_at", oldSetCreatedAt).Error; err != nil {
-		t.Fatal(err)
+	agedSetCreatedAt := before.Add(-24 * time.Hour)
+	for _, pair := range [][]model.MediaArtifact{oldPair, currentPair} {
+		if err := model.DB.Model(&model.MediaSet{}).Where("id = ?", pair[0].SetID).Update("created_at", agedSetCreatedAt).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	checked, err := model.CheckMediaRetention(before)
 	if err != nil {
