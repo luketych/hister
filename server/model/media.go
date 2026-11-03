@@ -112,8 +112,9 @@ type MediaArtifact struct {
 	ID    string `gorm:"primaryKey"`
 	SetID string `gorm:"not null;uniqueIndex:idx_media_set_role"`
 	MediaArtifactInput
-	RetiredAt *time.Time
-	CreatedAt time.Time
+	RetiredAt      *time.Time
+	BytesRemovedAt *time.Time `gorm:"index" json:"-"`
+	CreatedAt      time.Time
 }
 
 func mediaDB() (*gorm.DB, error) {

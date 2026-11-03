@@ -3,6 +3,7 @@
 package media_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -58,5 +59,65 @@ func TestOpenArtifactDistinguishesMissingFromInvalidFiles(t *testing.T) {
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRemoveArtifactChecksTheValidatedFileIdentity(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "retained"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := testutil.WriteFile(t, root, filepath.Join("retained", "video.webm"), []byte("video"))
+	artifact := model.MediaArtifactInput{StorageRoot: root, RelativePath: filepath.Join("retained", "video.webm"), Size: 5}
+	file, expected, err := media.OpenArtifact(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := media.HashArtifact(context.Background(), file, artifact.Size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := media.RemoveArtifact(artifact, expected, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed artifact stat = %v, want not-exist", err)
+	}
+
+	file, _, err = media.OpenArtifact(model.MediaArtifactInput{StorageRoot: root, RelativePath: filepath.Join("retained", "next.webm"), Size: 5})
+	if file != nil || !errors.Is(err, os.ErrNotExist) {
+		if file != nil {
+			_ = file.Close()
+		}
+		t.Fatalf("missing artifact open = %v", err)
+	}
+	nextPath := testutil.WriteFile(t, root, filepath.Join("retained", "next.webm"), []byte("video"))
+	next := model.MediaArtifactInput{StorageRoot: root, RelativePath: filepath.Join("retained", "next.webm"), Size: 5}
+	file, expected, err = media.OpenArtifact(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err = media.HashArtifact(context.Background(), file, next.Size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(nextPath, nextPath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, root, filepath.Join("retained", "next.webm"), []byte("other"))
+	if err := media.RemoveArtifact(next, expected, digest); !errors.Is(err, media.ErrInvalidOutput) {
+		t.Fatalf("replacement removal error = %v, want invalid output", err)
+	}
+	if data, err := os.ReadFile(nextPath); err != nil || string(data) != "other" {
+		t.Fatalf("replacement was removed or changed: %q, %v", data, err)
 	}
 }

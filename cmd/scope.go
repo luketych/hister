@@ -39,7 +39,7 @@ func configureCommandScopes() {
 	setCommandScope(configValidateCmd, executionScopeLocal, "server-url", "token", "search-url")
 	setCommandScope(mediaCmd, executionScopeLocal)
 	for _, cmd := range mediaCmd.Commands() {
-		if cmd.Name() == "check" || cmd.Name() == "apply" || cmd.Name() == "bootstrap-check" || cmd.Name() == "bootstrap-apply" {
+		if cmd.Name() == "check" || cmd.Name() == "apply" || cmd.Name() == "bootstrap-check" || cmd.Name() == "bootstrap-apply" || cmd.Name() == "retention-check" || cmd.Name() == "retention-apply" {
 			setCommandScope(cmd, executionScopeRemote, "client-timeout")
 		} else {
 			setCommandScope(cmd, executionScopeLocal)

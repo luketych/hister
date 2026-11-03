@@ -1063,6 +1063,32 @@ func init() {
 			},
 		},
 		{
+			Name:         "Check YouTube media retention",
+			Path:         "/api/yt_downloader/retention/check",
+			Method:       POST,
+			CSRFRequired: true,
+			AdminOnly:    true,
+			BodyLimit:    mediaCommandBodyLimit,
+			Handler:      serveMediaRetentionCheck,
+			Description:  "Read-only admin plan for explicitly pruning unselected media artifacts registered before a strict RFC3339 cutoff. Current selections are always excluded; already retired files remain eligible for retry. No files or registry rows are changed. The confirmation hashes the exact registry and file plan.",
+			JSONSchema: []*JSONSchemaField{
+				{Name: "before", Type: "string", Required: true, Description: "RFC3339 cutoff in the past; media sets created before this time are eligible"},
+			},
+		},
+		{
+			Name:         "Apply YouTube media retention",
+			Path:         "/api/yt_downloader/retention/apply",
+			Method:       POST,
+			CSRFRequired: true,
+			AdminOnly:    true,
+			BodyLimit:    mediaCommandBodyLimit,
+			Handler:      serveMediaRetentionApply,
+			Description:  "Retire the exact checked set of unselected artifacts, then remove their validated files. Requires X-Hister-Media-Retention-Confirmation from the latest check. Current selections cannot be retired; failed file removals remain tombstoned and are retryable. Cleanup is opt-in and is never run automatically.",
+			JSONSchema: []*JSONSchemaField{
+				{Name: "before", Type: "string", Required: true, Description: "Same RFC3339 cutoff reviewed by retention/check"},
+			},
+		},
+		{
 			Name:         "Check historical YouTube media approval",
 			Path:         "/api/yt_downloader/history/check",
 			Method:       POST,

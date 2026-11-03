@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/asciimoo/hister/client"
 	yt "github.com/asciimoo/hister/server/extractor/extractors/yt_downloader"
@@ -129,6 +130,66 @@ func newMediaCommand() *cobra.Command {
 	}
 	addMediaSourceBootstrapFlags(bootstrapCheck, false)
 
+	retentionCheck := &cobra.Command{
+		Use:   "retention-check",
+		Short: "Read-only plan to prune old unselected media artifacts",
+		Long:  "Ask the server for a read-only media-retention plan before an explicit RFC3339 cutoff. Current selections are never candidates. Cleanup is never automatic; review the exact files and confirmation hash before applying.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			before, err := mediaRetentionBeforeFlag(cmd)
+			if err != nil {
+				return err
+			}
+			c, _, err := inspectConfig()
+			if err != nil {
+				return err
+			}
+			result, err := newClientForConfig(c).CheckMediaRetention(cmd.Context(), before)
+			if err != nil {
+				return err
+			}
+			return writeMediaHistoryJSON(cmd, result)
+		},
+	}
+	retentionCheck.Flags().String("before", "", "RFC3339 cutoff in the past; only earlier artifacts are eligible")
+	_ = retentionCheck.MarkFlagRequired("before")
+
+	retentionApply := &cobra.Command{
+		Use:   "retention-apply",
+		Short: "Retire checked old media artifacts and remove their files",
+		Long:  "Apply a recent retention-check plan through the configured server. Requires its exact confirmation hash and --yes. The server retires registry records before unlinking files. Current selections are excluded; failed removals remain tombstoned and can be retried.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			if yes, _ := cmd.Flags().GetBool("yes"); !yes {
+				return errors.New("--yes is required to apply media retention")
+			}
+			confirmation, _ := cmd.Flags().GetString("confirmation")
+			if !validMediaHistoryConfirmation(confirmation) {
+				return errors.New("--confirmation must be the 64-character lowercase SHA-256 from a recent retention check")
+			}
+			before, err := mediaRetentionBeforeFlag(cmd)
+			if err != nil {
+				return err
+			}
+			c, _, err := inspectConfig()
+			if err != nil {
+				return err
+			}
+			result, err := newClientForConfig(c).ApplyMediaRetention(cmd.Context(), before, confirmation)
+			if err != nil {
+				return err
+			}
+			return writeMediaHistoryJSON(cmd, result)
+		},
+	}
+	retentionApply.Flags().String("before", "", "Same RFC3339 cutoff used by retention-check")
+	retentionApply.Flags().String("confirmation", "", "Exact confirmation SHA-256 returned by retention-check")
+	retentionApply.Flags().Bool("yes", false, "Confirm retirement and removal of checked media files")
+	_ = retentionApply.MarkFlagRequired("before")
+	_ = retentionApply.MarkFlagRequired("confirmation")
+
 	bootstrapApply := &cobra.Command{
 		Use:   "bootstrap-apply",
 		Short: "Establish the checked YouTube media source incarnation",
@@ -160,7 +221,7 @@ func newMediaCommand() *cobra.Command {
 	}
 	addMediaSourceBootstrapFlags(bootstrapApply, true)
 
-	parent.AddCommand(reconcile, check, apply, bootstrapCheck, bootstrapApply)
+	parent.AddCommand(reconcile, check, apply, bootstrapCheck, bootstrapApply, retentionCheck, retentionApply)
 	return parent
 }
 
@@ -176,6 +237,15 @@ func addMediaSourceBootstrapFlags(cmd *cobra.Command, apply bool) {
 		cmd.Flags().Bool("yes", false, "Confirm this checked source-incarnation creation")
 		_ = cmd.MarkFlagRequired("confirmation")
 	}
+}
+
+func mediaRetentionBeforeFlag(cmd *cobra.Command) (time.Time, error) {
+	value, _ := cmd.Flags().GetString("before")
+	before, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || !before.Before(time.Now()) {
+		return time.Time{}, errors.New("--before must be an RFC3339 timestamp in the past")
+	}
+	return before.UTC(), nil
 }
 
 func mediaSourceBootstrapRequestFlags(cmd *cobra.Command) (client.MediaSourceBootstrapRequest, error) {

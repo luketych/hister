@@ -62,8 +62,8 @@ jobs:
         # Windows race tests can exceed Go's default 10 minute package timeout.
         run: go test -race -cover -timeout 30m ./...
 
-  postgres-media-bootstrap-test:
-    name: PostgreSQL media bootstrap test
+  postgres-media-registry-test:
+    name: PostgreSQL media registry tests
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -92,8 +92,8 @@ jobs:
         with:
           go-version: 'stable'
 
-      - name: Run PostgreSQL media bootstrap integration test
-        run: go test -race ./server/model -run '^TestMediaSourceBootstrapPostgresSerializesApplyAndRejectsStalePlans$' -count=1
+      - name: Run PostgreSQL media registry integration tests
+        run: go test -race ./server/model -run '^TestMedia(SourceBootstrapPostgresSerializesApplyAndRejectsStalePlans|RetentionPostgresRetiresOnlyHistoricalArtifacts)$' -count=1
 
   app-browser-test:
     name: App browser tests

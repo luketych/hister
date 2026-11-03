@@ -6,7 +6,10 @@ package media
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,42 +73,11 @@ func StripMetadata(metadata map[string]any) {
 // callers use this anchored open to prevent relative-path/symlink escapes and
 // validate the actual opened regular file, not a checked-then-reopened pathname.
 func OpenArtifact(artifact model.MediaArtifactInput) (*os.File, os.FileInfo, error) {
-	if !filepath.IsAbs(artifact.StorageRoot) || filepath.Clean(artifact.StorageRoot) != artifact.StorageRoot || !filepath.IsLocal(artifact.RelativePath) || artifact.RelativePath == "." || filepath.Clean(artifact.RelativePath) != artifact.RelativePath || artifact.Size <= 0 {
-		return nil, nil, ErrInvalidOutput
-	}
-	// Pin each directory descriptor separately. Root.Open alone permits
-	// symlinks to other jobs inside the shared root, which could cross owners.
-	// Lstat + descriptor identity checks reject both those links and swaps
-	// between the check and open, including in the storage-root ancestors.
-	path := filepath.Join(artifact.StorageRoot, artifact.RelativePath)
-	base := filepath.VolumeName(path) + string(filepath.Separator)
-	parts := strings.Split(strings.TrimPrefix(path, base), string(filepath.Separator))
-	root, err := os.OpenRoot(base)
+	root, leaf, err := openArtifactParent(artifact)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { _ = root.Close() }()
-	for _, part := range parts[:len(parts)-1] {
-		before, err := root.Lstat(part)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
-			return nil, nil, ErrInvalidOutput
-		}
-		next, err := root.OpenRoot(part)
-		if err != nil {
-			return nil, nil, err
-		}
-		opened, err := next.Stat(".")
-		if err != nil || !os.SameFile(before, opened) {
-			_ = next.Close()
-			return nil, nil, ErrInvalidOutput
-		}
-		_ = root.Close()
-		root = next
-	}
-	leaf := parts[len(parts)-1]
 	before, err := root.Lstat(leaf)
 	if err != nil {
 		return nil, nil, err
@@ -123,4 +95,130 @@ func OpenArtifact(artifact model.MediaArtifactInput) (*os.File, os.FileInfo, err
 		return nil, nil, ErrInvalidOutput
 	}
 	return file, opened, nil
+}
+
+// RemoveArtifact removes only the exact regular file checked by OpenArtifact.
+// expected is the descriptor info captured during the current retention apply
+// preflight; a replaced or modified file is left in place for manual review.
+func RemoveArtifact(artifact model.MediaArtifactInput, expected os.FileInfo, expectedSHA256 string) error {
+	file, opened, err := OpenArtifact(artifact)
+	if err != nil {
+		return err
+	}
+	if expected != nil && (!os.SameFile(expected, opened) || expected.Size() != opened.Size() || expected.Mode() != opened.Mode() || !expected.ModTime().Equal(opened.ModTime())) {
+		_ = file.Close()
+		return ErrInvalidOutput
+	}
+	digest, err := HashArtifact(context.Background(), file, artifact.Size)
+	if err != nil || digest != expectedSHA256 {
+		_ = file.Close()
+		return ErrInvalidOutput
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	root, leaf, err := openArtifactParent(artifact)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	before, err := root.Lstat(leaf)
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() || !os.SameFile(opened, before) || before.Size() != artifact.Size || opened.Mode() != before.Mode() || !opened.ModTime().Equal(before.ModTime()) {
+		return ErrInvalidOutput
+	}
+	return root.Remove(leaf)
+}
+
+// HashArtifact hashes a safely opened artifact descriptor and rejects changes
+// observed during the read. It is useful for confirmation fingerprints on
+// destructive operations; caller still owns and must close the descriptor.
+func HashArtifact(ctx context.Context, file *os.File, expectedSize int64) (string, error) {
+	if file == nil || expectedSize <= 0 {
+		return "", ErrInvalidOutput
+	}
+	before, err := file.Stat()
+	if err != nil || !before.Mode().IsRegular() || before.Size() != expectedSize {
+		return "", ErrInvalidOutput
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	buffer := make([]byte, 128*1024)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, readErr := file.Read(buffer)
+		if n > 0 {
+			total += int64(n)
+			if total > expectedSize {
+				return "", ErrInvalidOutput
+			}
+			_, _ = hash.Write(buffer[:n])
+		}
+		if errors.Is(readErr, os.ErrClosed) {
+			return "", readErr
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return "", readErr
+		}
+	}
+	after, err := file.Stat()
+	if err != nil || total != expectedSize || !os.SameFile(before, after) || after.Size() != before.Size() || after.Mode() != before.Mode() || !after.ModTime().Equal(before.ModTime()) {
+		return "", ErrInvalidOutput
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func openArtifactParent(artifact model.MediaArtifactInput) (*os.Root, string, error) {
+	if !filepath.IsAbs(artifact.StorageRoot) || filepath.Clean(artifact.StorageRoot) != artifact.StorageRoot || !filepath.IsLocal(artifact.RelativePath) || artifact.RelativePath == "." || filepath.Clean(artifact.RelativePath) != artifact.RelativePath || artifact.Size <= 0 {
+		return nil, "", ErrInvalidOutput
+	}
+	// Pin each directory descriptor separately. Root.Open alone permits
+	// symlinks to other jobs inside the shared root, which could cross owners.
+	// Lstat + descriptor identity checks reject both those links and swaps
+	// between the check and open, including in the storage-root ancestors.
+	path := filepath.Join(artifact.StorageRoot, artifact.RelativePath)
+	base := filepath.VolumeName(path) + string(filepath.Separator)
+	parts := strings.Split(strings.TrimPrefix(path, base), string(filepath.Separator))
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return nil, "", err
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = root.Close()
+		}
+	}()
+	for _, part := range parts[:len(parts)-1] {
+		before, err := root.Lstat(part)
+		if err != nil {
+			return nil, "", err
+		}
+		if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+			return nil, "", ErrInvalidOutput
+		}
+		next, err := root.OpenRoot(part)
+		if err != nil {
+			return nil, "", err
+		}
+		opened, err := next.Stat(".")
+		if err != nil || !os.SameFile(before, opened) {
+			_ = next.Close()
+			return nil, "", ErrInvalidOutput
+		}
+		_ = root.Close()
+		root = next
+	}
+	closeOnError = false
+	return root, parts[len(parts)-1], nil
 }

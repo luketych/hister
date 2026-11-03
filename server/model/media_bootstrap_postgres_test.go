@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/asciimoo/hister/server/model"
 	"github.com/asciimoo/hister/server/testutil"
@@ -81,6 +83,80 @@ func initPostgresModel(t *testing.T) {
 		}
 		model.DB = nil
 	})
+}
+
+func TestMediaRetentionPostgresRetiresOnlyHistoricalArtifacts(t *testing.T) {
+	initPostgresModel(t)
+
+	root := t.TempDir()
+	writePair := func(name string) (string, string) {
+		t.Helper()
+		video := filepath.Join(root, name+".webm")
+		audio := filepath.Join(root, name+".mp3")
+		if err := os.WriteFile(video, []byte(name+" video"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(audio, []byte(name+" audio"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return video, audio
+	}
+	oldVideo, oldAudio := writePair("old")
+	oldPair := testutil.SeedMediaPair(t, "postgres-retention", 41, oldVideo, oldAudio)
+	newVideo, newAudio := writePair("new")
+	currentPair := testutil.SeedMediaPair(t, "postgres-retention", 41, newVideo, newAudio)
+
+	before := time.Now().UTC().Add(-24 * time.Hour)
+	oldSetCreatedAt := before.Add(-24 * time.Hour)
+	if err := model.DB.Model(&model.MediaSet{}).Where("id = ?", oldPair[0].SetID).Update("created_at", oldSetCreatedAt).Error; err != nil {
+		t.Fatal(err)
+	}
+	checked, err := model.CheckMediaRetention(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checked.Artifacts) != 2 || checked.SelectedArtifactsExcluded != 2 {
+		t.Fatalf("PostgreSQL retention plan = %#v; want two old and two selected artifacts", checked)
+	}
+	if err := model.DB.Model(&model.MediaArtifact{}).Where("id = ?", checked.Artifacts[0].Artifact.ID).Update("content_type", "video/x-changed").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.RetireMediaForRetention(before, checked.RegistryConfirmationSHA256); !errors.Is(err, model.ErrMediaRetentionConfirmation) {
+		t.Fatalf("retire after registry changed = %v, want stale confirmation", err)
+	}
+	checked, err = model.CheckMediaRetention(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired, err := model.RetireMediaForRetention(before, checked.RegistryConfirmationSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retired) != 2 {
+		t.Fatalf("retired %d PostgreSQL artifacts, want two", len(retired))
+	}
+	for _, item := range retired {
+		if item.Artifact.RetiredAt == nil || item.SelectedSetID == item.Artifact.SetID {
+			t.Fatalf("retired artifact was not tombstoned or became selected: %#v", item)
+		}
+		path := filepath.Join(item.Artifact.StorageRoot, item.Artifact.RelativePath)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := model.MarkMediaArtifactBytesRemoved(item.Artifact.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remaining, err := model.CheckMediaRetention(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining.Artifacts) != 0 || remaining.SelectedArtifactsExcluded != 2 {
+		t.Fatalf("PostgreSQL retention after cleanup = %#v; want only selected artifacts excluded", remaining)
+	}
+	if len(currentPair) != 2 {
+		t.Fatalf("fixture current pair has %d artifacts, want two", len(currentPair))
+	}
 }
 
 func TestMediaSourceBootstrapPostgresSerializesApplyAndRejectsStalePlans(t *testing.T) {

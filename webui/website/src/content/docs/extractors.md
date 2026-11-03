@@ -462,7 +462,42 @@ manifests, not media directories; per-job reports remain in the local cache.
 Deletion revokes bindings without deleting bytes, and re-add does not revive
 old links. Ownership moves cancel incompatible work and transfer retained
 history; a partial SQL/index move remains unavailable until deliberately
-reconciled. Cleanup and legacy reconciliation are not automatic.
+reconciled. Media is retained by default; neither re-indexing nor generic
+`hister purge` removes media files.
+
+##### Opt-in media retention cleanup
+
+Cleanup is a separate administrator-only operation. It selects media sets by
+registry creation time before an explicit past RFC3339 cutoff, keeping a video's
+and audio's retention decision together; it does not scan
+directories, use file modification times, or accept client-supplied paths.
+Currently selected artifacts are always excluded. Previously retired records
+remain eligible so an interrupted file removal can be retried.
+
+First inspect the exact server-generated plan:
+
+```bash
+hister media retention-check --before '2025-01-01T00:00:00Z'
+```
+
+Review candidate IDs, roles, sizes, file status, excluded current artifacts and
+the returned confirmation hash. It fingerprints the checked file contents, so a
+same-size replacement after check invalidates the plan. Apply only that plan, with
+the same cutoff:
+
+```bash
+hister media retention-apply \
+  --before '2025-01-01T00:00:00Z' \
+  --confirmation <confirmation_sha256> --yes
+```
+
+Apply rechecks the plan, marks candidate registry records retired first, and
+then removes only validated files. Retired records remain as tombstones, so old
+links return `410 media_retired`; they are never silently revived. If a file is
+missing, changed or cannot be safely removed, its tombstone stays and the result
+reports it for review/retry. No cleanup runs automatically. Back up the database
+and media storage before applying a cleanup plan; do not use this workflow for
+historical import or as a substitute for a consistent backup.
 
 The extractor is **disabled by default**. Enable it only after installing a
 compatible `yt_downloader` build. This extractor is local to this custom Hister

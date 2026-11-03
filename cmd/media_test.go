@@ -79,6 +79,24 @@ func TestMediaSourceBootstrapCommandsRequireExplicitBindingAndConfirmation(t *te
 	}
 }
 
+func TestMediaRetentionCommandsRequireExplicitCutoffAndConfirmation(t *testing.T) {
+	for _, args := range [][]string{
+		{"retention-check"},
+		{"retention-apply"},
+		{"retention-apply", "--before", "2020-01-01T00:00:00Z", "--confirmation", strings.Repeat("a", 64)},
+		{"retention-check", "--before", "2999-01-01T00:00:00Z"},
+	} {
+		command := newMediaCommand()
+		var out bytes.Buffer
+		command.SetOut(&out)
+		command.SetErr(&out)
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil {
+			t.Fatalf("accepted incomplete or invalid retention command: %v", args)
+		}
+	}
+}
+
 func TestMediaHistoryCommandsRequireExplicitApprovalAndConfirmation(t *testing.T) {
 	root := t.TempDir()
 	approvalPath := filepath.Join(root, "approval.json")
