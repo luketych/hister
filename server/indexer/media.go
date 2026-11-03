@@ -58,10 +58,23 @@ func (i *Indexer) initMedia(cfg *config.Config) error {
 		return err
 	}
 	if i.mediaRegistry {
-		if err := model.InterruptMediaAttempts(); err != nil {
+		lock, err := model.AcquireMediaQueueLock()
+		if errors.Is(err, model.ErrMediaQueueAlreadyRunning) {
+			log.Debug().Msg("media queue already active; skipped startup recovery")
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		return model.InterruptQueuedMediaAttempts()
+		defer func() {
+			if err := lock.Close(); err != nil {
+				log.Error().Err(err).Msg("could not release media queue startup lock")
+			}
+		}()
+		if err := lock.InterruptMediaAttempts(); err != nil {
+			return err
+		}
+		return lock.InterruptQueuedMediaAttempts()
 	}
 	return nil
 }

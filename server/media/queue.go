@@ -45,23 +45,30 @@ type Queue struct {
 	mu       sync.Mutex
 	closed   bool
 	active   map[string]activeAttempt
+	lock     *model.MediaQueueLock
 }
 
 func NewQueue(workers int, runner Runner, validate SourceValidator) (*Queue, error) {
 	if workers < 1 || runner == nil || validate == nil {
 		return nil, errors.New("media queue requires workers, runner and source validation")
 	}
-	if err := model.InterruptMediaAttempts(); err != nil {
+	lock, err := model.AcquireMediaQueueLock()
+	if err != nil {
+		return nil, err
+	}
+	if err := lock.InterruptMediaAttempts(); err != nil {
+		_ = lock.Close()
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	q := &Queue{
 		ctx: ctx, cancel: cancel, workers: workers, runner: runner, validate: validate,
-		wake: make(chan struct{}, workers), active: make(map[string]activeAttempt),
+		wake: make(chan struct{}, workers), active: make(map[string]activeAttempt), lock: lock,
 	}
 	for range workers {
 		q.wg.Go(q.work)
 	}
+	q.wg.Go(q.watchLock)
 	return q, nil
 }
 
@@ -86,7 +93,7 @@ func (q *Queue) work() {
 	for q.ctx.Err() == nil {
 		pending, err := model.NextQueuedMediaAttempt()
 		if err == nil && pending != nil {
-			claimed, claimErr := model.ClaimMediaAttempt(pending.ID)
+			claimed, claimErr := q.lock.ClaimMediaAttempt(pending.ID)
 			if claimErr == nil {
 				q.run(claimed)
 				continue
@@ -203,6 +210,18 @@ func (q *Queue) CancelAttempt(id string) error {
 	return nil
 }
 
+func (q *Queue) watchLock() {
+	select {
+	case <-q.ctx.Done():
+	case err := <-q.lock.Lost():
+		q.mu.Lock()
+		q.closed = true
+		q.cancel()
+		q.mu.Unlock()
+		log.Error().Err(err).Msg("media queue lease lost; workers are stopping")
+	}
+}
+
 func (q *Queue) Close() {
 	q.mu.Lock()
 	q.closed = true
@@ -217,4 +236,7 @@ func (q *Queue) Close() {
 	q.cancel()
 	q.mu.Unlock()
 	q.wg.Wait()
+	if err := q.lock.Close(); err != nil {
+		log.Error().Err(err).Msg("could not release media queue lock")
+	}
 }

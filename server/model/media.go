@@ -39,6 +39,14 @@ var (
 	ErrMediaSourceRevoked = errors.New("media source is revoked")
 )
 
+// MediaQueueLease serializes dispatcher ownership across server processes.
+type MediaQueueLease struct {
+	Name       string    `gorm:"primaryKey" json:"-"`
+	OwnerToken string    `gorm:"not null" json:"-"`
+	Fence      uint64    `gorm:"not null;default:0" json:"-"`
+	ExpiresAt  time.Time `gorm:"not null;index" json:"-"`
+}
+
 // MediaSource is a server-owned incarnation of an indexed source document.
 // DocumentID must be derived from the normalized URL and authoritative owner,
 // never from a submitted DocumentID. Revocation retains history and frees the
@@ -208,6 +216,31 @@ func withMediaAttempt(id string, fn func(*gorm.DB, *MediaSource, *MediaAttempt) 
 	})
 }
 
+// withMediaAttemptLockedTx is used after the lease row has been written in the
+// caller's transaction, so SQLite is already holding its write lock before the
+// attempt/source reads begin.
+func withMediaAttemptLockedTx(tx *gorm.DB, id string, fn func(*gorm.DB, *MediaSource, *MediaAttempt) error) error {
+	var observed MediaAttempt
+	if err := tx.Select("source_id").First(&observed, "id = ?", id).Error; err != nil {
+		return err
+	}
+	source, err := lockMediaSource(tx, observed.SourceID)
+	if err != nil {
+		return err
+	}
+	if source.RevokedAt != nil {
+		return ErrMediaSourceRevoked
+	}
+	if source.Suspended {
+		return ErrMediaConflict
+	}
+	var attempt MediaAttempt
+	if err := tx.First(&attempt, "id = ? AND source_id = ?", id, source.ID).Error; err != nil {
+		return err
+	}
+	return fn(tx, source, &attempt)
+}
+
 // ReserveMediaAttempt assigns ordering before extraction without claiming that
 // work is queued. Accept the same RequestID only after the actual document
 // commit. Failed/stale document writes must abandon their reservation.
@@ -271,21 +304,25 @@ func saveMediaAttempt(tx *gorm.DB, attempt *MediaAttempt) error {
 func ClaimMediaAttempt(id string) (*MediaAttempt, error) {
 	var claimed MediaAttempt
 	err := withMediaAttempt(id, func(tx *gorm.DB, _ *MediaSource, attempt *MediaAttempt) error {
-		if attempt.State != MediaQueued {
-			return ErrMediaConflict
-		}
-		attempt.State = MediaStarting
-		attempt.ClaimToken = rand.Text()
-		if err := saveMediaAttempt(tx, attempt); err != nil {
-			return err
-		}
-		claimed = *attempt
-		return nil
+		return claimMediaAttempt(tx, attempt, &claimed)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &claimed, nil
+}
+
+func claimMediaAttempt(tx *gorm.DB, attempt, claimed *MediaAttempt) error {
+	if attempt.State != MediaQueued {
+		return ErrMediaConflict
+	}
+	attempt.State = MediaStarting
+	attempt.ClaimToken = rand.Text()
+	if err := saveMediaAttempt(tx, attempt); err != nil {
+		return err
+	}
+	*claimed = *attempt
+	return nil
 }
 
 func mediaAttemptActive(state string) bool {
@@ -367,15 +404,15 @@ func CancelMediaAttempt(id string) error {
 	})
 }
 
-// InterruptMediaAttempts must run during exclusive startup recovery with old
-// workers stopped. Queued work remains dispatchable; uncommitted reservations
+// InterruptMediaAttempts is available only while holding the cross-process
+// media queue lock. Queued work remains dispatchable; uncommitted reservations
 // and claimed/unpublished work are interrupted, never promoted by discovering
 // files on disk.
-func InterruptMediaAttempts() error {
-	db, err := mediaDB()
-	if err != nil {
-		return err
-	}
+func (l *MediaQueueLock) InterruptMediaAttempts() error {
+	return l.withLeaseTransaction(interruptMediaAttempts)
+}
+
+func interruptMediaAttempts(db *gorm.DB) error {
 	return db.Model(&MediaAttempt{}).Where("state IN ?", []string{MediaPendingCommit, MediaStarting, MediaDownloading, MediaFinalizing}).Updates(map[string]any{
 		"state": MediaInterrupted, "claim_token": "", "error_code": "interrupted",
 		"video_state": gorm.Expr("CASE WHEN video_state = ? THEN video_state ELSE ? END", MediaDownloaded, MediaInterrupted),

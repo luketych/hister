@@ -142,6 +142,7 @@ func automigrate() error {
 		&DocumentVersion{},
 		&EmbeddingJob{},
 		&WebSession{},
+		&MediaQueueLease{},
 		&MediaSource{},
 		&MediaAttempt{},
 		&MediaSet{},

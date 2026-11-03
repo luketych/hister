@@ -123,14 +123,14 @@ func AbandonMediaReservation(id string) error {
 	})
 }
 
-// InterruptQueuedMediaAttempts is used only during exclusive initialization
-// when the extractor is disabled: accepted work cannot claim to be in a queue
-// that has no dispatcher. It may be explicitly requested again after enabling.
-func InterruptQueuedMediaAttempts() error {
-	db, err := mediaDB()
-	if err != nil {
-		return err
-	}
+// InterruptQueuedMediaAttempts is used only while holding the cross-process
+// media queue lock when the extractor is disabled. Accepted work may be
+// explicitly requested again after enabling.
+func (l *MediaQueueLock) InterruptQueuedMediaAttempts() error {
+	return l.withLeaseTransaction(interruptQueuedMediaAttempts)
+}
+
+func interruptQueuedMediaAttempts(db *gorm.DB) error {
 	return db.Model(&MediaAttempt{}).Where("state = ?", MediaQueued).Updates(map[string]any{
 		"state": MediaInterrupted, "video_state": MediaInterrupted, "audio_state": MediaInterrupted,
 		"claim_token": "", "error_code": "dispatcher_disabled",

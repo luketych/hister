@@ -121,6 +121,74 @@ func fakeRunner(ctx context.Context, request media.Request, events media.ModeEve
 	return pair, nil
 }
 
+func TestQueueOwnsDatabaseLockUntilWorkersStop(t *testing.T) {
+	queueDatabase(t)
+	validate := func(*model.MediaSource, media.Request) bool { return true }
+	first, err := media.NewQueue(1, fakeRunner, validate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	competing, err := media.NewQueue(1, fakeRunner, validate)
+	if !errors.Is(err, model.ErrMediaQueueAlreadyRunning) {
+		if competing != nil {
+			competing.Close()
+		}
+		first.Close()
+		t.Fatalf("second dispatcher acquired the same database: %v", err)
+	}
+	first.Close()
+	second, err := media.NewQueue(1, fakeRunner, validate)
+	if err != nil {
+		t.Fatalf("dispatcher could not start after release: %v", err)
+	}
+	second.Close()
+}
+
+func TestQueueCancelsWorkersAfterLeaseLost(t *testing.T) {
+	root := queueDatabase(t)
+	started, stopped := make(chan struct{}), make(chan struct{})
+	q, err := media.NewQueue(1, func(ctx context.Context, _ media.Request, _ media.ModeEvents) ([]model.MediaArtifactInput, error) {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return nil, ctx.Err()
+	}, func(*model.MediaSource, media.Request) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := reservation(t, media.Request{URL: "lease-loss", OutputRoot: root})
+	if _, err := q.Accept(intent); err != nil {
+		q.Close()
+		t.Fatal(err)
+	}
+	receiveStart(t, started)
+	if err := model.DB.Model(&model.MediaQueueLease{}).Where("name = ?", "dispatcher").Update("expires_at", time.Unix(0, 0).UTC()).Error; err != nil {
+		q.Close()
+		t.Fatal(err)
+	}
+	successor, err := model.AcquireMediaQueueLock()
+	if err != nil {
+		q.Close()
+		t.Fatalf("successor could not acquire expired lease: %v", err)
+	}
+	if err := successor.InterruptMediaAttempts(); err != nil {
+		q.Close()
+		_ = successor.Close()
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(8 * time.Second):
+		q.Close()
+		_ = successor.Close()
+		t.Fatal("lease loss did not cancel the active worker")
+	}
+	q.Close()
+	if err := successor.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestQueueBoundedWorkersAndPersistedWaitingWork(t *testing.T) {
 	root := queueDatabase(t)
 	started, release := make(chan struct{}, 4), make(chan struct{})

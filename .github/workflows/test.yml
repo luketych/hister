@@ -93,7 +93,7 @@ jobs:
           go-version: 'stable'
 
       - name: Run PostgreSQL media registry integration tests
-        run: go test -race ./server/model -run '^TestMedia(SourceBootstrapPostgresSerializesApplyAndRejectsStalePlans|RetentionPostgresRetiresOnlyHistoricalArtifacts)$' -count=1
+        run: go test -race ./server/model -run '^TestMedia(SourceBootstrapPostgresSerializesApplyAndRejectsStalePlans|RetentionPostgresRetiresOnlyHistoricalArtifacts|QueuePostgresLockExcludesConcurrentOwners)$' -count=1
 
   app-browser-test:
     name: App browser tests

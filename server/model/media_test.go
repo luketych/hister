@@ -611,10 +611,19 @@ func TestMediaRegistryRestartRecovery(t *testing.T) {
 	}
 	closeMediaDB(t)
 	testutil.InitModelWithConfig(t, cfg)
-	if err := model.InterruptMediaAttempts(); err != nil {
+	lock, err := model.AcquireMediaQueueLock()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := model.InterruptMediaAttempts(); err != nil {
+	t.Cleanup(func() {
+		if err := lock.Close(); err != nil {
+			t.Errorf("release media queue lock: %v", err)
+		}
+	})
+	if err := lock.InterruptMediaAttempts(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.InterruptMediaAttempts(); err != nil {
 		t.Fatalf("repeat recovery: %v", err)
 	}
 	for _, id := range []string{starting.ID, downloading.ID, finalizing.ID, reserved.ID} {
