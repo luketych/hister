@@ -94,8 +94,8 @@ func TestMediaHistoryChangedInputAndBindingConflicts(t *testing.T) {
 	}
 	mutations := []func(*model.MediaHistoryInput){
 		func(in *model.MediaHistoryInput) { in.ApprovalJSON = `{"version": 1}` },
-		func(in *model.MediaHistoryInput) { in.Pair[0].StorageRoot = "/other" },
-		func(in *model.MediaHistoryInput) { in.Pair[0].RelativePath = "else/video.webm" },
+		func(in *model.MediaHistoryInput) { in.Pair[0].StorageRoot = filepath.Join(os.TempDir(), "other") },
+		func(in *model.MediaHistoryInput) { in.Pair[0].RelativePath = filepath.Join("else", "video.webm") },
 		func(in *model.MediaHistoryInput) { in.Pair[0].Size++ },
 		func(in *model.MediaHistoryInput) { in.Pair[0].JobID = "else" },
 		func(in *model.MediaHistoryInput) {
