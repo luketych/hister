@@ -145,6 +145,38 @@ func selectedMedia(t *testing.T) []model.MediaArtifact {
 	return artifacts
 }
 
+func TestOnDemandInitialMediaAndDeletedReaddFence(t *testing.T) {
+	idx, _ := mediaIndexer(t, mediaSuccessScript, &mediaContentExtractor{})
+	if err := idx.Add(&document.Document{URL: mediaSourceURL, Title: "searchable", HTML: "<p>source</p>"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.GetMediaSource(document.GetDocID(0, mediaSourceURL)); err == nil {
+		t.Fatal("indexing created a media source")
+	}
+	id := document.GetDocID(0, mediaSourceURL)
+	first, err := idx.StartMedia(context.Background(), id, MediaActor{})
+	if err != nil || first.Replayed || first.Attempt.State != model.MediaQueued {
+		t.Fatalf("first action = %#v, %v", first, err)
+	}
+	duplicate, err := idx.StartMedia(context.Background(), id, MediaActor{})
+	if err != nil || !duplicate.Replayed || duplicate.Attempt.ID != first.Attempt.ID {
+		t.Fatalf("duplicate action = %#v, %v", duplicate, err)
+	}
+	attempt := waitMedia(t, first.Attempt.Generation, model.MediaReady)
+	if attempt.VideoJobID == nil || attempt.AudioJobID == nil || len(selectedMedia(t)) != 2 {
+		t.Fatalf("download did not publish both modes: %#v", attempt)
+	}
+	if err := idx.Delete(mediaSourceURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Add(&document.Document{URL: mediaSourceURL, Text: "re-added", Processed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.StartMedia(context.Background(), id, MediaActor{}); !errors.Is(err, model.ErrMediaSourceRevoked) {
+		t.Fatalf("stale action revived deleted incarnation: %v", err)
+	}
+}
+
 func TestMediaLegacyAndCanonicalConfigBothDispatchOnce(t *testing.T) {
 	for _, name := range []string{config.LegacyYTDownloaderName, config.YTDownloaderName} {
 		t.Run(name, func(t *testing.T) {
@@ -152,13 +184,24 @@ func TestMediaLegacyAndCanonicalConfigBothDispatchOnce(t *testing.T) {
 			if err := idx.Add(&document.Document{URL: mediaSourceURL, Title: "alias", HTML: "<p>source</p>"}); err != nil {
 				t.Fatal(err)
 			}
+			var count int64
+			if err := model.DB.Model(&model.MediaAttempt{}).Count(&count).Error; err != nil || count != 0 {
+				t.Fatalf("indexing scheduled media: count=%d, error=%v", count, err)
+			}
+			first, err := idx.StartMedia(context.Background(), document.GetDocID(0, mediaSourceURL), MediaActor{})
+			if err != nil || first.Replayed || first.Attempt.State != model.MediaQueued {
+				t.Fatalf("explicit first download = %#v, %v", first, err)
+			}
+			duplicate, err := idx.StartMedia(context.Background(), document.GetDocID(0, mediaSourceURL), MediaActor{})
+			if err != nil || !duplicate.Replayed || duplicate.Attempt.ID != first.Attempt.ID {
+				t.Fatalf("duplicate initial action = %#v, %v", duplicate, err)
+			}
 			waitMedia(t, 1, model.MediaReady)
 			if len(selectedMedia(t)) != 2 {
-				t.Fatal("alias configuration did not publish its complete pair")
+				t.Fatal("explicit action did not publish video and audio")
 			}
-			var count int64
 			if err := model.DB.Model(&model.MediaAttempt{}).Count(&count).Error; err != nil || count != 1 {
-				t.Fatalf("alias scheduled duplicate attempts: count=%d, error=%v", count, err)
+				t.Fatalf("duplicate action scheduled attempts: count=%d, error=%v", count, err)
 			}
 		})
 	}
@@ -177,13 +220,16 @@ func TestMediaFailedFreshUpdatePreservesStoredSelection(t *testing.T) {
 	if err := idx.AddContext(context.Background(), &document.Document{URL: mediaSourceURL, Title: "new visit", HTML: "<p>new visit</p>"}); err != nil {
 		t.Fatal(err)
 	}
-	waitMedia(t, 2, model.MediaFailed)
 	if got := selectedMedia(t); !reflect.DeepEqual(got, previous) {
 		t.Fatalf("failed fresh update replaced retained artifacts: %#v", got)
 	}
 	stored := idx.GetByURLAndUser(mediaSourceURL, 0)
 	if stored == nil || stored.Text != "searchable new visit" {
-		t.Fatalf("media failure blocked normal indexing: %#v", stored)
+		t.Fatalf("media behavior blocked normal indexing: %#v", stored)
+	}
+	var attempts int64
+	if err := model.DB.Model(&model.MediaAttempt{}).Where("state = ?", model.MediaQueued).Count(&attempts).Error; err != nil || attempts != 0 {
+		t.Fatalf("reindex scheduled work: %d, %v", attempts, err)
 	}
 }
 
@@ -213,19 +259,19 @@ func TestMediaOlderIndexCommitCannotReplaceNewerSelection(t *testing.T) {
 		}
 		t.Fatal(newerErr)
 	}
-	waitMedia(t, 2, model.MediaReady)
-	accepted := selectedMedia(t)
+	if got, err := model.MediaArtifactsForDocument(mediaSourceURL, 0); err != nil || len(got) != 0 {
+		t.Fatalf("index update scheduled media: %#v, %v", got, err)
+	}
 	releaseOlder()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	waitMedia(t, 1, model.MediaReady)
-	if got := selectedMedia(t); !reflect.DeepEqual(got, accepted) {
-		t.Fatalf("late older index write regressed selected media: %#v", got)
+	if got := idx.GetByDocID(mediaSourceURL); got == nil {
+		t.Fatal("delayed indexed source disappeared")
 	}
-	artifacts, err := model.MediaArtifactsForDocument(mediaSourceURL, 0)
-	if err != nil || len(artifacts) != 4 {
-		t.Fatalf("late success did not retain history: %d, %v", len(artifacts), err)
+	var attempts int64
+	if err := model.DB.Model(&model.MediaAttempt{}).Count(&attempts).Error; err != nil || attempts != 0 {
+		t.Fatalf("indexing created attempts: %d, %v", attempts, err)
 	}
 }
 
@@ -236,9 +282,8 @@ func TestMediaBatchWaitsForActualSaveAndKeepsReservedOrdering(t *testing.T) {
 	if err := batch.Add(&document.Document{URL: mediaSourceURL, Title: "older batch", HTML: "<p>older</p>"}); err != nil {
 		t.Fatal(err)
 	}
-	waitMedia(t, 1, model.MediaPendingCommit)
 	if queued, err := model.NextQueuedMediaAttempt(); err != nil || queued != nil {
-		t.Fatalf("staging fabricated queued work: %#v, %v", queued, err)
+		t.Fatalf("indexing fabricated queued work: %#v, %v", queued, err)
 	}
 	if idx.GetByDocID(mediaSourceURL) != nil {
 		t.Fatal("batch staging committed its document")
@@ -246,29 +291,25 @@ func TestMediaBatchWaitsForActualSaveAndKeepsReservedOrdering(t *testing.T) {
 	if err := idx.Add(&document.Document{URL: mediaSourceURL, Title: "newer", HTML: "<p>newer</p>"}); err != nil {
 		t.Fatal(err)
 	}
-	waitMedia(t, 2, model.MediaReady)
-	accepted := selectedMedia(t)
 	if err := batch.Save(); err != nil {
 		t.Fatal(err)
 	}
-	waitMedia(t, 1, model.MediaReady)
-	if got := selectedMedia(t); !reflect.DeepEqual(got, accepted) {
-		t.Fatalf("later batch Save regressed selected media: %#v", got)
+	if got, err := model.MediaArtifactsForDocument(mediaSourceURL, 0); err != nil || len(got) != 0 {
+		t.Fatalf("batch indexing scheduled media: %#v, %v", got, err)
+	}
+	var attempts int64
+	if err := model.DB.Model(&model.MediaAttempt{}).Count(&attempts).Error; err != nil || attempts != 0 {
+		t.Fatalf("batch indexing created attempts: %d, %v", attempts, err)
 	}
 }
 
 func TestMediaDiscardAndFailedCommitsDoNotQueue(t *testing.T) {
-	for _, operation := range []string{"discard", "single failure", "batch failure", "acceptance failure"} {
+	for _, operation := range []string{"discard", "single failure", "batch failure"} {
 		t.Run(operation, func(t *testing.T) {
 			idx, _ := mediaIndexer(t, mediaSuccessScript, &mediaContentExtractor{})
 			if operation == "single failure" || operation == "batch failure" {
 				for name, index := range idx.indexers {
 					idx.indexers[name] = failingBlobCommitIndex{bleveIndex: index, fail: func() error { return errors.New("injected index failure") }}
-				}
-			}
-			if operation == "acceptance failure" {
-				if err := model.DB.Exec(`CREATE TRIGGER reject_queue BEFORE UPDATE OF state ON media_attempts WHEN NEW.state = 'queued' BEGIN SELECT RAISE(ABORT, 'injected queue acceptance failure'); END`).Error; err != nil {
-					t.Fatal(err)
 				}
 			}
 			doc := &document.Document{URL: mediaSourceURL, HTML: "<p>source</p>"}
@@ -285,40 +326,71 @@ func TestMediaDiscardAndFailedCommitsDoNotQueue(t *testing.T) {
 			} else if err := idx.Add(doc); err == nil {
 				t.Fatal("single write ignored injected failure")
 			}
-			waitMedia(t, 1, model.MediaInterrupted)
+			var attempts int64
+			if err := model.DB.Model(&model.MediaAttempt{}).Count(&attempts).Error; err != nil || attempts != 0 {
+				t.Fatalf("index operation created attempts: %d, %v", attempts, err)
+			}
 			if queued, err := model.NextQueuedMediaAttempt(); err != nil || queued != nil {
 				t.Fatalf("failed/uncommitted write left queued work: %#v, %v", queued, err)
-			}
-			if operation == "acceptance failure" && idx.GetByDocID(mediaSourceURL) == nil {
-				t.Fatal("SQL failure after Bleve commit erased searchable source")
 			}
 		})
 	}
 }
 
-func TestMediaDeleteFencesDelayedIndexWrite(t *testing.T) {
-	reached, release := make(chan struct{}), make(chan struct{})
-	idx, _ := mediaIndexer(t, mediaSuccessScript, &mediaContentExtractor{run: func(*document.Document) { close(reached); <-release }})
-	done := make(chan error, 1)
-	finished := make(chan struct{})
-	releaseWrite := sync.OnceFunc(func() { close(release) })
-	go func() {
-		defer close(finished)
-		done <- idx.Add(&document.Document{URL: mediaSourceURL, HTML: "<p>delayed</p>"})
-	}()
-	t.Cleanup(func() { releaseWrite(); <-finished })
-	awaitMediaSignal(t, reached)
-	deleteErr := idx.Delete(mediaSourceURL)
-	releaseWrite()
-	writeErr := <-done
-	if deleteErr != nil {
-		t.Fatal(deleteErr)
+func TestDeletingFirstSeenYouTubeLeavesTombstoneAndBlocksReaddedAction(t *testing.T) {
+	idx, _ := mediaIndexer(t, mediaSuccessScript, &mediaContentExtractor{})
+	if err := idx.Add(&document.Document{URL: mediaSourceURL, Text: "searchable", Processed: true}); err != nil {
+		t.Fatal(err)
 	}
-	if !errors.Is(writeErr, model.ErrMediaSourceRevoked) {
-		t.Fatalf("stale write after deletion = %v", writeErr)
+	if err := idx.Delete(mediaSourceURL); err != nil {
+		t.Fatal(err)
 	}
-	if idx.GetByDocID(mediaSourceURL) != nil {
-		t.Fatal("delayed request resurrected deleted source")
+	if err := idx.Add(&document.Document{URL: mediaSourceURL, Text: "re-added", Processed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.StartMedia(context.Background(), document.GetDocID(0, mediaSourceURL), MediaActor{}); !errors.Is(err, model.ErrMediaSourceRevoked) {
+		t.Fatalf("re-added YouTube document accepted a stale first-download action: %v", err)
+	}
+	var sources []model.MediaSource
+	if err := model.DB.Where("document_id = ?", mediaSourceURL).Find(&sources).Error; err != nil || len(sources) != 1 || sources[0].RevokedAt == nil {
+		t.Fatalf("first-use deletion did not retain its tombstone: %#v, %v", sources, err)
+	}
+}
+
+func TestDeletingOrdinaryDocumentAddsNoMediaRowsAndMissingDocumentRevokesLegacySource(t *testing.T) {
+	idx, _ := mediaIndexer(t, mediaSuccessScript, &mediaContentExtractor{})
+	ordinaryURL := "https://example.invalid/page"
+	if err := idx.Add(&document.Document{URL: ordinaryURL, Text: "ordinary", Processed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Delete(ordinaryURL); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := model.DB.Model(&model.MediaSource{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("ordinary delete created media rows: %d, %v", count, err)
+	}
+
+	if err := idx.Add(&document.Document{URL: mediaSourceURL, Text: "YouTube", Processed: true}); err != nil {
+		t.Fatal(err)
+	}
+	source, err := model.EnsureMediaSource(mediaSourceURL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an unavailable/moved index entry while its old registry binding
+	// remains. Deletion must still revoke that known binding without URL guesses.
+	for _, index := range idx.indexes() {
+		if err := index.Delete(mediaSourceURL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := idx.Delete(mediaSourceURL); err != nil {
+		t.Fatal(err)
+	}
+	var stored model.MediaSource
+	if err := model.DB.First(&stored, "id = ?", source.ID).Error; err != nil || stored.RevokedAt == nil {
+		t.Fatalf("missing-document deletion failed to revoke legacy source: %#v, %v", stored, err)
 	}
 }
 
@@ -344,6 +416,9 @@ func TestMediaAcceptedWorkOutlivesRequestAndDoesNotBlockSearch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := idx.AddContext(ctx, &document.Document{URL: mediaSourceURL, Title: "visible", HTML: "<p>source</p>"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.StartMedia(ctx, document.GetDocID(0, mediaSourceURL), MediaActor{}); err != nil {
 		t.Fatal(err)
 	}
 	awaitMediaSignal(t, started)

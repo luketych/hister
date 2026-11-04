@@ -48,6 +48,46 @@ func (i *Indexer) mediaCommandDocument(id string, actor MediaActor) (*document.D
 	return doc, nil
 }
 
+func (i *Indexer) StartMedia(ctx context.Context, documentID string, actor MediaActor, options ...AddOption) (*model.MediaInitialResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock := i.lockMediaDocuments(documentID)
+	defer unlock()
+	doc, err := i.mediaCommandDocument(documentID, actor)
+	if err != nil {
+		return nil, err
+	}
+	if !doc.IgnoreSkipRules() && newAddOptions(options).rules.IsSkip(doc.URL) {
+		return nil, ErrMediaSourceSkipped
+	}
+	if i.mediaRetryConfig == nil {
+		return nil, ErrMediaDisabled
+	}
+	e := &yt.YTDownloader{}
+	if err := e.SetConfig(i.mediaRetryConfig.Clone()); err != nil {
+		return nil, err
+	}
+	request, err := e.MediaRequest(doc)
+	if err != nil {
+		return nil, model.ErrMediaConflict
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	i.mediaMu.Lock()
+	queue, closed := i.mediaQueue, i.mediaClosed
+	i.mediaMu.Unlock()
+	if closed || queue == nil {
+		return nil, media.ErrDispatcherUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return queue.StartInitial(model.MediaScope{DocumentID: doc.ID(), UserID: doc.UserID}, string(encoded))
+}
+
 func (i *Indexer) RetryMedia(ctx context.Context, documentID, attemptID string, actor MediaActor, options ...AddOption) (*model.MediaRetryResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -244,15 +244,30 @@ func (i *Indexer) revokeMedia(id string) error {
 	if !i.mediaRegistry {
 		return nil
 	}
-	source, err := model.GetMediaSource(id)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if err := model.RevokeMediaSource(source.ID); err != nil {
-		return err
+	doc := i.GetByDocID(id)
+	var source *model.MediaSource
+	if doc != nil && doc.ID() == id && (&yt.YTDownloader{}).Match(doc) {
+		// Only an indexed, positively identified YouTube document may create a
+		// first-use tombstone. This fences a stale cross-process start command.
+		var err error
+		source, err = model.RevokeMediaDocument(id, doc.UserID)
+		if err != nil {
+			return err
+		}
+	} else {
+		// For ordinary/missing documents, preserve revocation of an existing
+		// binding without manufacturing a tombstone or guessing from the ID.
+		var err error
+		source, err = model.GetMediaSource(id)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := model.RevokeMediaSource(source.ID); err != nil {
+			return err
+		}
 	}
 	i.mediaMu.Lock()
 	queue := i.mediaQueue

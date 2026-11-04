@@ -23,6 +23,114 @@ type MediaRetryResult struct {
 	Replayed bool
 }
 
+type MediaInitialResult struct {
+	Attempt  MediaAttempt
+	Replayed bool
+}
+
+// AcceptInitialMediaAttempt atomically establishes a source only when no
+// incarnation (including a tombstone) exists, then records one durable initial
+// attempt. The source-table write lock serializes first-use across processes;
+// unique ActiveKey is the final constraint. Existing attempts are replayed, so
+// repeated clicks and page refreshes never schedule a second download.
+func AcceptInitialMediaAttempt(scope MediaScope, requestJSON string) (*MediaInitialResult, error) {
+	var request map[string]any
+	if scope.DocumentID == "" || len(requestJSON) > 64*1024 || json.Unmarshal([]byte(requestJSON), &request) != nil || request == nil {
+		return nil, errors.New("initial media request requires a source and server-owned JSON request")
+	}
+	db, err := mediaDB()
+	if err != nil {
+		return nil, err
+	}
+	var result MediaInitialResult
+	err = db.Transaction(func(tx *gorm.DB) error {
+		switch tx.Name() {
+		case "postgres":
+			if err := tx.Exec("LOCK TABLE media_sources IN SHARE ROW EXCLUSIVE MODE").Error; err != nil {
+				return err
+			}
+		case "sqlite":
+			if err := tx.Exec("UPDATE media_sources SET updated_at = updated_at WHERE 1 = 0").Error; err != nil {
+				return err
+			}
+		default:
+			return ErrDBType
+		}
+		var sources []MediaSource
+		if err := tx.Where("document_id = ?", scope.DocumentID).Order("id ASC").Find(&sources).Error; err != nil {
+			return err
+		}
+		var source MediaSource
+		activeCount := 0
+		for _, candidate := range sources {
+			if candidate.UserID != scope.UserID {
+				return gorm.ErrRecordNotFound
+			}
+			if candidate.RevokedAt == nil {
+				activeCount++
+				source = candidate
+			}
+		}
+		if activeCount > 1 {
+			return ErrMediaConflict
+		}
+		if activeCount == 0 {
+			if len(sources) > 0 {
+				return ErrMediaSourceRevoked
+			}
+			key := mediaSourceKey(scope.DocumentID, scope.UserID)
+			source = MediaSource{ID: rand.Text(), DocumentID: scope.DocumentID, UserID: scope.UserID, ActiveKey: &key}
+			if err := tx.Create(&source).Error; err != nil {
+				return err
+			}
+		} else if source.Suspended || source.ActiveKey == nil || *source.ActiveKey != mediaSourceKey(scope.DocumentID, scope.UserID) {
+			return ErrMediaConflict
+		}
+		requestID := "initial:" + source.ID
+		var existing MediaAttempt
+		err := tx.Where("source_id = ? AND request_id = ?", source.ID, requestID).First(&existing).Error
+		if err == nil {
+			result.Attempt, result.Replayed = existing, true
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		// Preserve pre-existing accepted/retry history, including attempts made
+		// by older versions that did not use the initial request receipt.
+		var latest MediaAttempt
+		err = tx.Where("source_id = ? AND state NOT IN ? AND error_code <> ?", source.ID, []string{MediaPendingCommit, MediaHistorical}, "coalesced").Order("CASE WHEN publication_generation > generation THEN publication_generation ELSE generation END DESC").First(&latest).Error
+		if err == nil {
+			result.Attempt, result.Replayed = latest, true
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if source.SelectedSetID != "" {
+			return ErrMediaConflict
+		}
+		if source.NextGeneration >= math.MaxInt64 {
+			return errors.New("media generation exhausted")
+		}
+		generation := source.NextGeneration + 1
+		attempt := MediaAttempt{ID: rand.Text(), SourceID: source.ID, RequestID: requestID, RequestJSON: requestJSON,
+			Generation: generation, PublicationGeneration: generation, State: MediaQueued, VideoState: MediaQueued, AudioState: MediaQueued}
+		if err := tx.Create(&attempt).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&source).Update("next_generation", generation).Error; err != nil {
+			return err
+		}
+		result.Attempt = attempt
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // MediaAttemptInScope is a read-only preflight for command eligibility. Every
 // actual transition still rechecks this binding under the source transaction.
 func MediaAttemptInScope(scope MediaScope, id string) (*MediaAttempt, error) {

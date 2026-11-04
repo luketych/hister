@@ -14,7 +14,40 @@
   let status = $state<MediaStatus>(untrack(() => data));
   let error = $state('');
   let polling = $state(false);
+  let submitting = $state(false);
   let refreshStatus: () => void = () => {};
+  let canRetry = $derived(
+    Boolean(
+      status.attempt && ['failed', 'cancelled', 'interrupted'].includes(status.attempt.state),
+    ),
+  );
+  let hasReadyMedia = $derived(status.available.some((artifact) => artifact.state === 'ready'));
+
+  async function requestDownload() {
+    if (submitting || !status.document_id) return;
+    submitting = true;
+    error = '';
+    try {
+      const retry =
+        status.attempt && ['failed', 'cancelled', 'interrupted'].includes(status.attempt.state);
+      const response = await apiFetch(`/yt_downloader/${retry ? 'retry' : 'start'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          retry
+            ? { document_id: status.document_id, attempt_id: status.attempt!.id }
+            : { document_id: status.document_id },
+        ),
+      });
+      if (!response.ok)
+        throw new Error('Could not start the YouTube download. Check status and try again.');
+      refreshStatus();
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Could not start the YouTube download.';
+    } finally {
+      submitting = false;
+    }
+  }
 
   $effect(() => {
     const initial = data;
@@ -129,13 +162,26 @@
           <p>{failureMessage(status.attempt.error_code)}</p>
           {#if !status.active}
             <p class="text-text-brand-muted text-sm">
-              Re-submit this page to request another download.
+              Use Retry download to request another attempt.
             </p>
           {/if}
         {/if}
       </section>
     {:else if !status.available.length}
       <p>No committed media files are available. No download is queued.</p>
+    {/if}
+    {#if !status.unavailable && !status.active && (canRetry || !hasReadyMedia)}
+      <button
+        class="text-hister-teal cursor-pointer text-sm underline disabled:cursor-wait"
+        disabled={submitting}
+        onclick={requestDownload}
+      >
+        {submitting
+          ? 'Starting download…'
+          : canRetry
+            ? 'Retry download'
+            : 'Download video and audio'}
+      </button>
     {/if}
     {#if status.active}
       <p class="text-text-brand-muted text-sm" role="status">

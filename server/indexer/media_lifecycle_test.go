@@ -188,13 +188,8 @@ func TestMediaPartialMultiIndexBatchFailureDoesNotDispatch(t *testing.T) {
 		t.Fatalf("did not exercise partial multi-index save: commits=%d, error=%v", commits, err)
 	}
 	var attempts []model.MediaAttempt
-	if err := model.DB.Find(&attempts).Error; err != nil || len(attempts) != 2 {
-		t.Fatalf("reservations = %#v, %v", attempts, err)
-	}
-	for _, attempt := range attempts {
-		if attempt.State != model.MediaInterrupted {
-			t.Fatalf("partial batch save accepted work: %#v", attempt)
-		}
+	if err := model.DB.Find(&attempts).Error; err != nil || len(attempts) != 0 {
+		t.Fatalf("indexing created media attempts: %#v, %v", attempts, err)
 	}
 }
 

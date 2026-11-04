@@ -96,6 +96,64 @@ func mediaCommandError(c *webContext, err error) {
 	}
 }
 
+func serveMediaStart(c *webContext) {
+	request, ok := decodeMediaStart(c)
+	if !ok {
+		return
+	}
+	result, err := c.Indexer.StartMedia(c.Request.Context(), request.DocumentID, indexer.MediaActor{UserID: c.UserID, IsAdmin: c.IsAdmin}, indexer.WithRules(c.effectiveRules()))
+	if err != nil {
+		mediaCommandError(c, err)
+		return
+	}
+	status := http.StatusAccepted
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	c.JSONStatus(status, mediaCommandResponse{AttemptID: result.Attempt.ID, State: result.Attempt.State, Replayed: result.Replayed})
+}
+
+type mediaStartRequest struct {
+	DocumentID string `json:"document_id"`
+}
+
+func decodeMediaStart(c *webContext) (*mediaStartRequest, bool) {
+	if c.Request.Method != http.MethodPost {
+		c.Response.Header().Set("Allow", http.MethodPost)
+		http.Error(c.Response, "POST required", http.StatusMethodNotAllowed)
+		return nil, false
+	}
+	if !canWrite(c) {
+		serve403(c)
+		return nil, false
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(c.Response, c.Request.Body, maxMediaCommandBytes))
+	decoder.DisallowUnknownFields()
+	var request mediaStartRequest
+	if err := decoder.Decode(&request); err != nil {
+		if !requestBodyTooLarge(c, err) {
+			http.Error(c.Response, "invalid media command request", http.StatusBadRequest)
+		}
+		return nil, false
+	}
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		if !requestBodyTooLarge(c, err) {
+			http.Error(c.Response, "expected one media command object", http.StatusBadRequest)
+		}
+		return nil, false
+	}
+	if strings.TrimSpace(request.DocumentID) == "" {
+		http.Error(c.Response, "document_id is required", http.StatusBadRequest)
+		return nil, false
+	}
+	if !model.DatabaseMatches(c.Config) {
+		http.NotFound(c.Response, c.Request)
+		return nil, false
+	}
+	c.Response.Header().Set("Cache-Control", "no-store")
+	return &request, true
+}
+
 func serveMediaRetry(c *webContext) {
 	request, ok := decodeMediaCommand(c)
 	if !ok {

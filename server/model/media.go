@@ -577,6 +577,75 @@ func cancelSourceMediaAttempts(tx *gorm.DB, sourceID, code string) error {
 	}).Error
 }
 
+// RevokeMediaDocument leaves a tombstone even when no media source was ever
+// created. Callers must first confirm the exact live indexed document is a
+// YouTube source. This closes the first-use/delete race across processes: the
+// same database table lock serializes deletion against initial acceptance.
+func RevokeMediaDocument(documentID string, userID uint) (*MediaSource, error) {
+	if documentID == "" {
+		return nil, errors.New("media source document ID must not be empty")
+	}
+	db, err := mediaDB()
+	if err != nil {
+		return nil, err
+	}
+	var revoked MediaSource
+	err = db.Transaction(func(tx *gorm.DB) error {
+		switch tx.Name() {
+		case "postgres":
+			if err := tx.Exec("LOCK TABLE media_sources IN SHARE ROW EXCLUSIVE MODE").Error; err != nil {
+				return err
+			}
+		case "sqlite":
+			if err := tx.Exec("UPDATE media_sources SET updated_at = updated_at WHERE 1 = 0").Error; err != nil {
+				return err
+			}
+		default:
+			return ErrDBType
+		}
+		var sources []MediaSource
+		if err := tx.Where("document_id = ?", documentID).Find(&sources).Error; err != nil {
+			return err
+		}
+		if len(sources) == 0 {
+			now := time.Now().UTC()
+			revoked = MediaSource{ID: rand.Text(), DocumentID: documentID, UserID: userID, RevokedAt: &now, CreatedAt: now, UpdatedAt: now}
+			return tx.Create(&revoked).Error
+		}
+		activeCount := 0
+		for index := range sources {
+			source := &sources[index]
+			if source.UserID != userID {
+				return ErrMediaConflict
+			}
+			if source.RevokedAt != nil {
+				continue
+			}
+			activeCount++
+			if activeCount > 1 {
+				return ErrMediaConflict
+			}
+			if err := cancelSourceMediaAttempts(tx, source.ID, "source_deleted"); err != nil {
+				return err
+			}
+			now := time.Now().UTC()
+			if err := tx.Model(source).Updates(map[string]any{"revoked_at": now, "active_key": nil}).Error; err != nil {
+				return err
+			}
+			source.RevokedAt, source.ActiveKey = &now, nil
+			revoked = *source
+		}
+		if activeCount == 0 {
+			revoked = sources[len(sources)-1]
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &revoked, nil
+}
+
 // RevokeMediaSource invalidates bindings and pending publication, retaining all
 // records and bytes. It does not stop processes; the dispatcher must cancel them.
 func RevokeMediaSource(id string) error {

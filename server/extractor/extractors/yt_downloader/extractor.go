@@ -183,25 +183,20 @@ func (e *YTDownloader) Extract(d *sdk.Document) sdk.ExtractResult {
 	return e.ExtractContext(context.Background(), d)
 }
 
-// ExtractContext is run in Hister's enrichment phase. A successful download
-// does not claim content extraction, so the later ytdlp/readability extractors
-// still populate the document and preview.
+// ExtractContext is run in Hister's enrichment phase. Indexing never schedules
+// media: the authenticated preview action is the sole path that accepts work.
 func (e *YTDownloader) ExtractContext(ctx context.Context, d *sdk.Document) sdk.ExtractResult {
 	if !e.GetConfig().Enable {
+		return sdk.ExtractFallback(nil)
+	}
+	// Indexing contexts carry a stager. Treat this extractor as preview-only in
+	// that path; media is accepted only by the authenticated source command.
+	if medialifecycle.HasStager(ctx) {
 		return sdk.ExtractFallback(nil)
 	}
 	options, err := e.downloaderOptions()
 	if err != nil {
 		return sdk.ExtractFallback(err)
-	}
-	if handled, err := medialifecycle.Stage(ctx, medialifecycle.Request{
-		URL: d.URL, UserID: d.UserID, Binary: options.binary, OutputRoot: options.outputRoot,
-		Backend: options.backend, Transcribe: options.transcribe, Timeout: options.timeout,
-	}); handled {
-		if err != nil {
-			return sdk.ExtractFallback(err)
-		}
-		return sdk.Extracted()
 	}
 	// Standalone extraction retains the producer-protocol client behavior.
 	// Indexing always supplies a stager and never publishes these references.

@@ -403,13 +403,18 @@ A local download enricher and preview renderer for this Hister checkout. It
 invokes the configured `yt_downloader` executable in video and audio-only
 modes. The audio mode does not promise a particular container or stream
 composition; the downloader may use its documented audio-bearing media fallback.
-By default Hister does not request captions. Set `transcribe: true` to request
-available English captions as VTT sidecars; this does not run speech recognition
-or add captions to Hister's indexed text. The enricher stages a server-owned
-download request; work is accepted only after the source document commits.
-Background workers download independently, so normal content extraction and
-searchable indexing do not wait for media to finish. A pair becomes ready only
-after both files pass manifest/file validation and atomic registry publication.
+Indexing does not automatically start a download. Open the indexed YouTube
+result's preview and press **Download video** and **Download audio** to explicitly
+start both asynchronous jobs. They do not block indexing or each other. Failed
+jobs can be retried from the preview. By default Hister does not request
+captions. Set `transcribe: true` to request available English captions as VTT
+sidecars; this does not run speech recognition or add captions to Hister's
+indexed text. A pair becomes ready only after both files pass manifest/file
+validation and atomic registry publication.
+
+Install a compatible `yt_downloader` producer build and its runtime dependencies
+before enabling this extractor. The producer requires Deno and EJS; follow the
+producer's installation instructions to install/configure both.
 
 Select this extractor in the preview menu to see **In queue**, **Starting**,
 **Downloading**, **Downloaded — waiting for audio**, **Finalizing**,
@@ -453,10 +458,12 @@ server-owned artifact IDs, not file paths, legacy URIs or raw errors. Reading
 an unavailable link does not schedule a replacement; status reports separately
 whether real work is active.
 
-Fresh unprocessed page submissions request a refresh. Processed imports,
-`Save`, index rebuilds and status/preview reads do not request downloads.
-Compatible in-flight requests for the same source/owner/options reuse the real
-attempt; a later fresh submission after it finishes requests another attempt.
+Indexing, processed imports, `Save`, index rebuilds and status/preview reads do
+not request downloads. The preview's **Download video** and **Download audio**
+actions explicitly start work for the indexed source. Compatible in-flight
+requests for the same source/owner/options reuse the real attempt. A ready pair
+is not silently replaced by a new request; older published media remains
+available while a retry runs or fails.
 Hister retains media and failed-attempt files. It removes temporary result
 manifests, not media directories; per-job reports remain in the local cache.
 Deletion revokes bindings without deleting bytes, and re-add does not revive
@@ -500,12 +507,13 @@ and media storage before applying a cleanup plan; do not use this workflow for
 historical import or as a substitute for a consistent backup.
 
 The extractor is **disabled by default**. Enable it only after installing a
-compatible `yt_downloader` build. This extractor is local to this custom Hister
-build and is not included in Hister's published binary. Shutdown interrupts
-claimed work; queued work resumes after restart when the extractor is enabled.
-If disabled on restart, unresolved work is marked interrupted rather than shown
-as queued without a dispatcher. Cancelling accepted work or deleting its source
-fences publication and terminates the downloader process group on Linux and
+compatible `yt_downloader` producer build and its EJS/Deno dependencies. This
+extractor is local to this custom Hister build and is not included in Hister's
+published binary. Shutdown interrupts claimed work; already-queued work resumes
+after restart when the extractor is enabled. If disabled on restart, unresolved
+work is marked interrupted rather than shown as queued without a dispatcher.
+Cancelling accepted work or deleting its source fences publication and
+terminates the downloader process group on Linux and
 macOS; other platforms may not stop child processes. Merely closing an indexing
 request or preview does not cancel already accepted work.
 
@@ -680,6 +688,11 @@ Read the status endpoint for `document_id` and `attempt.id`, then send only:
 { "document_id": "<source document ID>", "attempt_id": "<attempt ID>" }
 ```
 
+- **`POST /api/yt_downloader/start`** explicitly accepts the first video-and-
+  audio download for a currently indexed YouTube source. It is idempotent and
+  never silently replaces existing or historical media. Send
+  `{ "document_id": "<source document ID>" }`. It requires source mutation
+  permission and is subject to the caller's current URL allow/skip rules.
 - **`POST /api/yt_downloader/retry`** retries the latest failed, cancelled or
   interrupted attempt on an existing committed source, without re-indexing its
   content or replacing the previous ready pair. Current server downloader
@@ -705,8 +718,9 @@ playback availability.
 Invalid/stale transitions or already-won publication return **409**; current
 URL-rule exclusions return **406**. Unknown/out-of-scope attempts return **404**,
 and unavailable dispatch/storage returns **503**. Both commands retain existing
-ready files and historical links. Status/preview reads still never enqueue work;
-these APIs do not add preview action buttons.
+ready files and historical links. Status and passive preview reads never
+enqueue work. The preview's explicit **Download video** and **Download audio**
+actions use the start API.
 
 #### Options
 

@@ -65,6 +65,106 @@ test('extractor menu uses only the canonical downloader name', async ({ page }) 
   );
 });
 
+test('the preview explicitly starts both media modes and reports command failures', async ({
+  page,
+}) => {
+  await previewStatus(page, {
+    document_id: 'document-1',
+    available: [],
+    active: false,
+    attempt: null,
+  });
+  let calls = 0;
+  await page.route('**/api/yt_downloader/start', async (route) => {
+    calls++;
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON()).toEqual({ document_id: 'document-1' });
+    await route.fulfill({ status: 503, json: { error: 'unavailable' } });
+  });
+  await page.goto(previewPath(sourceURL));
+  const article = page.getByRole('article', { name: 'Downloaded media' });
+  const button = article.getByRole('button', { name: 'Download video and audio' });
+  await button.click();
+  await expect(article.getByRole('alert')).toContainText('Could not start the YouTube download');
+  expect(calls).toBe(1);
+  await button.click();
+  expect(calls).toBe(2);
+});
+
+test('first download shows queued progress; rapid clicks submit only once', async ({ page }) => {
+  await previewStatus(page, {
+    document_id: 'document-1',
+    available: [],
+    active: false,
+    attempt: null,
+  });
+  let calls = 0;
+  let release!: () => void;
+  const pendingResponse = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route('**/api/yt_downloader/start', async (route) => {
+    calls++;
+    await pendingResponse;
+    await route.fulfill({
+      status: 202,
+      json: { attempt_id: 'attempt-1', state: 'queued', replayed: false },
+    });
+  });
+  await page.route('**/api/yt_downloader/status?**', (route) => route.fulfill({ json: queued }));
+  await page.goto(previewPath(sourceURL));
+  const article = page.getByRole('article', { name: 'Downloaded media' });
+  const actionButton = article.getByRole('button', {
+    name: /Download video and audio|Starting download/,
+  });
+  await actionButton.click();
+  // The accessible name changes immediately while the command is in flight;
+  // match both labels so this assertion targets that same disabled button.
+  await expect(actionButton).toBeDisabled();
+  await actionButton.click({ force: true });
+  expect(calls).toBe(1);
+  release();
+  await expect(article).toContainText('Video: In queue');
+  await expect(article).toContainText('Audio: In queue');
+  await expect(
+    article.getByRole('button', { name: /Download video and audio|Starting download/ }),
+  ).toHaveCount(0);
+});
+
+test('failed attempt retry posts its attempt ID and restores active progress', async ({ page }) => {
+  const failed: MediaStatus = {
+    document_id: 'document-1',
+    available: [],
+    active: false,
+    attempt: {
+      id: 'failed-attempt',
+      generation: 1,
+      state: 'failed',
+      video: 'failed',
+      audio: 'failed',
+      error_code: 'download_failed',
+    },
+  };
+  await previewStatus(page, failed);
+  await page.route('**/api/yt_downloader/retry', async (route) => {
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON()).toEqual({
+      document_id: 'document-1',
+      attempt_id: 'failed-attempt',
+    });
+    await route.fulfill({
+      status: 202,
+      json: { attempt_id: 'attempt-2', state: 'queued', replayed: false },
+    });
+  });
+  await page.route('**/api/yt_downloader/status?**', (route) => route.fulfill({ json: queued }));
+  await page.goto(previewPath(sourceURL));
+  const article = page.getByRole('article', { name: 'Downloaded media' });
+  await article.getByRole('button', { name: 'Retry download' }).click();
+  await expect(article).toContainText('Video: In queue');
+  await expect(article).toContainText('Audio: In queue');
+});
+
 test('pending files never link; publication appears automatically and stops polling', async ({
   page,
 }) => {
@@ -121,13 +221,29 @@ test('pending files never link; publication appears automatically and stops poll
   expect(reads).toBe(terminalReads);
 });
 
-test('failed refresh leaves previous ready files playable and no new links', async ({ page }) => {
+test('failed refresh keeps saved playback and retries the latest attempt', async ({ page }) => {
   let current: MediaStatus = {
     ...structuredClone(queued),
     available: structuredClone(ready.available),
   };
   await previewStatus(page, current);
   await page.route('**/api/yt_downloader/status?**', (route) => route.fulfill({ json: current }));
+  await page.route('**/api/yt_downloader/retry', async (route) => {
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON()).toEqual({
+      document_id: 'document-1',
+      attempt_id: 'attempt-1',
+    });
+    current = {
+      ...current,
+      active: true,
+      attempt: { ...queued.attempt!, id: 'attempt-2', generation: 2 },
+    };
+    await route.fulfill({
+      status: 202,
+      json: { attempt_id: 'attempt-2', state: 'queued', replayed: false },
+    });
+  });
   await page.goto(previewPath(sourceURL));
   const article = page.getByRole('article', { name: 'Downloaded media' });
   await expect(article).toContainText('New download');
@@ -153,6 +269,15 @@ test('failed refresh leaves previous ready files playable and no new links', asy
     'href',
     '/api/yt_downloader/media?id=video-1',
   );
+  await article.getByRole('button', { name: 'Retry download' }).click();
+  await expect(article).toContainText('Video: In queue');
+  await expect(article).toContainText('Audio: In queue');
+  await expect(article.getByRole('link')).toHaveCount(2);
+  await expect(article.getByRole('link', { name: 'Play audio', exact: true })).toHaveAttribute(
+    'href',
+    '/api/yt_downloader/media?id=audio-1',
+  );
+  await expect(article.getByRole('button', { name: 'Retry download' })).toHaveCount(0);
 });
 
 test('missing, retired and absent files are not ready or queued', async ({ page }) => {
