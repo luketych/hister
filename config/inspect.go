@@ -146,6 +146,11 @@ func (inputs *configInputs) decode(strict bool) (*Config, error) {
 			extractor.enableOmitted = !explicit
 		}
 	}
+	var err error
+	c.Extractors, err = NormalizeExtractorConfigs(c.Extractors)
+	if err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 

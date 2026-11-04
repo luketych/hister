@@ -228,6 +228,10 @@ func (i *Indexer) UpdateByQuery(
 				return result, fmt.Errorf("stage update for %s: %w", d.URL, err)
 			}
 			if update.originalID != d.ID() {
+				if err := batch.stageMediaMove(update.originalID, d.ID(), d.UserID); err != nil {
+					batch.Discard()
+					return result, fmt.Errorf("stage media ownership change: %w", err)
+				}
 				batch.Delete(update.originalID)
 				result.OwnershipChanges = append(result.OwnershipChanges, servertypes.DocumentOwnershipChange{
 					URL:        d.URL,

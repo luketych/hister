@@ -27,6 +27,7 @@ import (
 	"github.com/asciimoo/hister/server/extractor/extractors/stackexchange"
 	"github.com/asciimoo/hister/server/extractor/extractors/twitter"
 	"github.com/asciimoo/hister/server/extractor/extractors/wikipedia"
+	ytdownloader "github.com/asciimoo/hister/server/extractor/extractors/yt_downloader"
 	"github.com/asciimoo/hister/server/extractor/extractors/ytdlp"
 	"github.com/asciimoo/hister/server/extractor/sdk"
 )
@@ -74,6 +75,7 @@ func DefaultExtractors() []Extractor {
 		&bluesky.BlueskyExtractor{},
 		&twitter.TwitterExtractor{},
 		&notion.NotionExtractor{},
+		&ytdownloader.YTDownloader{},
 		&ytdlp.YtdlpExtractor{},
 		&chatgpt.ChatGPTExtractor{},
 		&readabilityExtractor{},
@@ -143,7 +145,7 @@ func (r *Registry) RegisterBefore(name string, candidate Extractor) error {
 	}
 	index := -1
 	for i, registered := range r.extractors {
-		if strings.EqualFold(registered.Name(), name) {
+		if strings.ToLower(registered.Name()) == config.CanonicalExtractorName(name) {
 			index = i
 			break
 		}
@@ -213,6 +215,10 @@ func isNilExtractor(candidate Extractor) bool {
 // Init merges user configuration into the defaults of every registered
 // extractor. Register all extractors before calling Init.
 func (r *Registry) Init(cfgs map[string]*config.Extractor) error {
+	cfgs, err := config.NormalizeExtractorConfigs(cfgs)
+	if err != nil {
+		return err
+	}
 	for _, candidate := range r.Extractors() {
 		defaults := candidate.GetConfig().Clone()
 		merged := &config.Extractor{
@@ -310,6 +316,10 @@ func (r *Registry) ConfigurationStates(current *config.Config) []config.FieldSta
 // ValidateConfiguration uses fresh built in instances and reports only safe
 // field errors. It never publishes a registry, extracts content, or probes tools.
 func ValidateConfiguration(cfgs map[string]*config.Extractor) []config.FieldError {
+	cfgs, err := config.NormalizeExtractorConfigs(cfgs)
+	if err != nil {
+		return []config.FieldError{{Path: "extractors.yt_downloader", Code: "conflicting_alias", Message: config.ErrExtractorAliasConflict.Error()}}
+	}
 	r := NewDefaultRegistry()
 	known := make(map[string]bool)
 	var fields []config.FieldError

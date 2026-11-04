@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/asciimoo/hister/server/document"
+	"github.com/asciimoo/hister/server/media"
 
 	"github.com/rs/zerolog/log"
 )
@@ -32,6 +33,7 @@ func prepareDocumentSubmission(c *webContext, d *document.Document) (int, error)
 // Storage keys identify server managed blobs, not content supplied by a client.
 // Derive them from submitted HTML and favicon data for every document type.
 func clearSubmittedStorageReferences(d *document.Document) {
+	media.StripMetadata(d.Metadata)
 	d.HTMLKey = ""
 	d.FaviconKey = ""
 }

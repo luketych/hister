@@ -16,6 +16,10 @@ import (
 // Extractors validates a fresh registry so inspection cannot alter the running
 // extractor chain. Unknown extractor names are errors rather than ignored keys.
 func Extractors(c *config.Config) (*extractor.Registry, error) {
+	cfgs, err := config.NormalizeExtractorConfigs(c.Extractors)
+	if err != nil {
+		return nil, err
+	}
 	r, err := extractor.NewRegistry(extractor.DefaultExtractors()...)
 	if err != nil {
 		return nil, err
@@ -24,7 +28,7 @@ func Extractors(c *config.Config) (*extractor.Registry, error) {
 	for _, candidate := range r.Extractors() {
 		known[strings.ToLower(candidate.Name())] = true
 	}
-	for name, entry := range c.Extractors {
+	for name, entry := range cfgs {
 		if !known[name] {
 			return nil, fmt.Errorf("unknown extractor %q; use a lower case extractor name", name)
 		}
@@ -32,7 +36,7 @@ func Extractors(c *config.Config) (*extractor.Registry, error) {
 			return nil, fmt.Errorf("extractor %q requires a configuration mapping", name)
 		}
 	}
-	if err := r.Init(c.Extractors); err != nil {
+	if err := r.Init(cfgs); err != nil {
 		return nil, err
 	}
 	return r, nil

@@ -1566,7 +1566,7 @@ func requestedDocument(c *webContext, u string) *document.Document {
 
 func servePreview(c *webContext) {
 	u := c.Request.URL.Query().Get("url")
-	extractorName := c.Request.URL.Query().Get("extractor")
+	extractorName := config.CanonicalExtractorName(c.Request.URL.Query().Get("extractor"))
 	versionIDStr := c.Request.URL.Query().Get("version")
 	doc := requestedDocument(c, u)
 	if doc == nil {
@@ -1595,7 +1595,7 @@ func servePreview(c *webContext) {
 	}
 	var resp sdk.PreviewResponse
 	var err error
-	if doc.HTML == "" {
+	if doc.HTML == "" && extractorName != config.YTDownloaderName {
 		resp = sdk.PreviewResponse{Content: html.EscapeString(doc.Text)}
 	} else {
 		resp, err = extractor.PreviewContext(c.Request.Context(), doc, extractorName)
@@ -1686,6 +1686,10 @@ func serveFile(c *webContext) {
 	if _, err := c.Response.Write(content); err != nil {
 		log.Warn().Err(err).Msg("failed to write file response")
 	}
+}
+
+func serveYTDownloaderMedia(c *webContext) {
+	serveRegisteredMedia(c)
 }
 
 func authorizedFilePath(c *webContext, id string, doc *document.Document) (string, *config.Directory, bool) {
