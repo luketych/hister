@@ -4,6 +4,7 @@ package model_test
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -24,6 +25,115 @@ func failedMediaCommand(t *testing.T, sourceID, requestID string) *model.MediaAt
 		t.Fatal(err)
 	}
 	return worker
+}
+
+func TestInitialMediaAcceptanceIsIdempotentAndNeverRevivesTombstones(t *testing.T) {
+	mediaSource(t) // initialize the synthetic test database
+	db, err := model.DB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(8)
+	documentID := "first-seen-document"
+	scope := model.MediaScope{DocumentID: documentID, UserID: 0}
+	const request = `{"url":"https://www.youtube.com/watch?v=abcdefghijk"}`
+	const callers = 8
+	var wg sync.WaitGroup
+	results := make(chan *model.MediaInitialResult, callers)
+	errs := make(chan error, callers)
+	for range callers {
+		wg.Go(func() {
+			result, err := model.AcceptInitialMediaAttempt(scope, request)
+			results <- result
+			errs <- err
+		})
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	id := ""
+	accepted := 0
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for result := range results {
+		if id == "" {
+			id = result.Attempt.ID
+		}
+		if result.Attempt.ID != id || result.Attempt.State != model.MediaQueued {
+			t.Fatalf("non-idempotent initial acceptance: %#v", result)
+		}
+		if !result.Replayed {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("initial requests accepted %d attempts", accepted)
+	}
+	source, err := model.GetMediaSource(documentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.RevokeMediaSource(source.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.AcceptInitialMediaAttempt(scope, request); !errors.Is(err, model.ErrMediaSourceRevoked) {
+		t.Fatalf("revoked incarnation was revived: %v", err)
+	}
+	if _, err := model.GetMediaSource(documentID); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("revoked source became active: %v", err)
+	}
+}
+
+func TestInitialAcceptanceRacesDeletionWithoutLeavingLiveWork(t *testing.T) {
+	mediaSource(t)
+	db, err := model.DB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(8)
+	for n := range 6 {
+		documentID := fmt.Sprintf("youtube-race-%d", n)
+		scope := model.MediaScope{DocumentID: documentID}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var accepted *model.MediaInitialResult
+		var acceptErr, revokeErr error
+		wg.Go(func() {
+			<-start
+			accepted, acceptErr = model.AcceptInitialMediaAttempt(scope, `{"url":"https://www.youtube.com/watch?v=abcdefghijk"}`)
+		})
+		wg.Go(func() {
+			<-start
+			_, revokeErr = model.RevokeMediaDocument(documentID, 0)
+		})
+		close(start)
+		wg.Wait()
+		if revokeErr != nil {
+			t.Fatal(revokeErr)
+		}
+		if acceptErr != nil && !errors.Is(acceptErr, model.ErrMediaSourceRevoked) {
+			t.Fatal(acceptErr)
+		}
+		var sources []model.MediaSource
+		if err := model.DB.Where("document_id = ?", documentID).Find(&sources).Error; err != nil || len(sources) != 1 || sources[0].RevokedAt == nil {
+			t.Fatalf("race left a live/missing source: %#v, %v", sources, err)
+		}
+		var attempts []model.MediaAttempt
+		if err := model.DB.Where("source_id = ?", sources[0].ID).Find(&attempts).Error; err != nil {
+			t.Fatal(err)
+		}
+		for _, attempt := range attempts {
+			if attempt.State != model.MediaCancelled {
+				t.Fatalf("delete race left accepted work live: %#v", attempt)
+			}
+		}
+		if acceptErr == nil && (accepted == nil || len(attempts) != 1) {
+			t.Fatalf("acceptance result not fenced by deletion: %#v, %#v", accepted, attempts)
+		}
+	}
 }
 
 func TestMediaCommandRetryReceiptAndTargetedCancellation(t *testing.T) {

@@ -123,6 +123,65 @@ func commandPost(t *testing.T, fixture *mediaCommandFixture, action, id, attempt
 	return testutil.ServeHTTP(t, fixture.handler, http.MethodPost, "/api/yt_downloader/"+action, strings.NewReader(string(body)), headers)
 }
 
+func commandStartPost(t *testing.T, fixture *mediaCommandFixture, documentID string, user *model.User, body string, origin string) *httptest.ResponseRecorder {
+	t.Helper()
+	headers := map[string]string{"Content-Type": "application/json", "Origin": origin}
+	if user != nil {
+		headers["X-Access-Token"] = user.Token
+	}
+	return testutil.ServeHTTP(t, fixture.handler, http.MethodPost, "/api/yt_downloader/start", strings.NewReader(body), headers)
+}
+
+func TestMediaStartAuthorizationValidationAndReplay(t *testing.T) {
+	fixture := mediaCommandServer(t, "")
+	valid, err := json.Marshal(map[string]string{"document_id": fixture.documentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := commandStartPost(t, fixture, fixture.documentID, fixture.owner, string(valid), "hister://"); response.Code != http.StatusOK {
+		t.Fatalf("replay of existing ready media = %d %s", response.Code, response.Body)
+	} else {
+		var result mediaCommandResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || !result.Replayed || result.AttemptID == "" {
+			t.Fatalf("existing attempt replay = %#v, %v", result, err)
+		}
+	}
+	badBodies := []struct {
+		name, body string
+		want       int
+	}{
+		{"missing document", `{}`, http.StatusBadRequest},
+		{"array", `[]`, http.StatusBadRequest},
+		{"extra JSON", string(valid) + `{}`, http.StatusBadRequest},
+		{"client attempt", strings.TrimSuffix(string(valid), "}") + `,"attempt_id":"foreign"}`, http.StatusBadRequest},
+		{"client options", strings.TrimSuffix(string(valid), "}") + `,"binary":"/foreign"}`, http.StatusBadRequest},
+		{"oversize", string(valid) + strings.Repeat(" ", 65536), http.StatusRequestEntityTooLarge},
+	}
+	for _, test := range badBodies {
+		t.Run(test.name, func(t *testing.T) {
+			response := commandStartPost(t, fixture, fixture.documentID, fixture.owner, test.body, "hister://")
+			if response.Code != test.want {
+				t.Fatalf("start = %d %s, want %d", response.Code, response.Body, test.want)
+			}
+		})
+	}
+	if response := commandStartPost(t, fixture, fixture.documentID, fixture.owner, string(valid), "https://evil.invalid"); response.Code != http.StatusForbidden {
+		t.Fatalf("cross-site start = %d %s", response.Code, response.Body)
+	}
+	foreignID := document.GetDocID(fixture.other.ID, commandSourceURL)
+	foreign, _ := json.Marshal(map[string]string{"document_id": foreignID})
+	if response := commandStartPost(t, fixture, foreignID, fixture.owner, string(foreign), "hister://"); response.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner start = %d %s", response.Code, response.Body)
+	}
+	if response := commandStartPost(t, fixture, fixture.documentID, nil, string(valid), "hister://"); response.Code != http.StatusForbidden {
+		t.Fatalf("read-only start = %d %s", response.Code, response.Body)
+	}
+	var count int64
+	if err := model.DB.Model(&model.MediaAttempt{}).Count(&count).Error; err != nil || count != 4 {
+		t.Fatalf("rejected starts changed attempt count: %d, %v", count, err)
+	}
+}
+
 func TestMediaCommandsRetryIsIdempotentAndKeepsPreviousDownload(t *testing.T) {
 	fixture := mediaCommandServer(t, "exit 1")
 	var accepted struct {
@@ -454,6 +513,9 @@ func TestMediaCommandsPublicReadOnlyCannotMutate(t *testing.T) {
 		if rec := commandPost(t, fixture, action, commandSourceURL, failed.ID, nil); rec.Code != http.StatusForbidden {
 			t.Fatalf("public read-only %s = %d %s", action, rec.Code, rec.Body)
 		}
+	}
+	if rec := commandStartPost(t, fixture, commandSourceURL, nil, `{"document_id":"`+commandSourceURL+`"}`, "hister://"); rec.Code != http.StatusForbidden {
+		t.Fatalf("public read-only start = %d %s", rec.Code, rec.Body)
 	}
 }
 

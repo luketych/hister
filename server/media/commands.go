@@ -19,6 +19,24 @@ func (q *Queue) notify() {
 	}
 }
 
+// StartInitial accepts one first-time request after the indexer has verified
+// the committed document while holding its per-document coordinator.
+func (q *Queue) StartInitial(scope model.MediaScope, requestJSON string) (*model.MediaInitialResult, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return nil, ErrDispatcherUnavailable
+	}
+	result, err := model.AcceptInitialMediaAttempt(scope, requestJSON)
+	if err != nil {
+		return nil, err
+	}
+	if !result.Replayed {
+		q.notify()
+	}
+	return result, nil
+}
+
 // Retry requires a previously authorized committed source and the indexer's
 // source coordinator. Acceptance and its idempotency receipt commit together.
 func (q *Queue) Retry(scope model.MediaScope, id, requestJSON string) (*model.MediaRetryResult, error) {

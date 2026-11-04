@@ -73,17 +73,17 @@ cd hister
 
 ### `yt_downloader` extractor
 
-The optional `yt_downloader` extractor invokes the separately installed
-`yt_downloader` executable for video and audio-only downloads. It leaves indexed
-content unchanged and can download caption sidecars when
-`extractors.yt_downloader.options.transcribe` is enabled. Selecting it in
-the preview extractor menu shows media links on the original YouTube result.
+The optional `yt_downloader` extractor does not download media during indexing.
+Open a YouTube result's preview and choose **Download video** and **Download
+audio** to start the two asynchronous jobs. Failed downloads can be retried;
+previously published media remains available while a new attempt runs or fails.
 See [Extractors](webui/website/src/content/docs/extractors.md) for setup and
-configuration. The extractor is disabled by default. Existing
-`extractors.yt_video_downloader` configurations and legacy preview/media URLs
-remain supported. Only one extractor is registered; conflicting settings under
-both configuration names are rejected. Reading an old config does not rewrite
-it or move existing downloads.
+configuration, including the compatible producer and its EJS/Deno dependencies.
+The extractor is disabled by default. Existing `extractors.yt_video_downloader`
+configurations and legacy preview/media URLs remain supported. Only one
+extractor is registered; conflicting settings under both configuration names
+are rejected. Reading an old config does not rewrite it or move existing
+downloads.
 
 To build and run this checkout with Nix:
 

@@ -1020,6 +1020,16 @@ func init() {
 			},
 		},
 		{
+			Name:         "Start YouTube download",
+			Path:         "/api/yt_downloader/start",
+			Method:       POST,
+			CSRFRequired: true,
+			BodyLimit:    mediaCommandBodyLimit,
+			Handler:      serveMediaStart,
+			Description:  "Explicitly accept the first video-and-audio download for a currently indexed YouTube source. Idempotent; existing or historical media is never silently replaced. Requires source mutation permission.",
+			JSONSchema:   []*JSONSchemaField{{Name: "document_id", Type: "string", Required: true, Description: "Committed source document ID"}},
+		},
+		{
 			Name:         "Retry YouTube download",
 			Path:         "/api/yt_downloader/retry",
 			Method:       POST,
