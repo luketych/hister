@@ -30,6 +30,8 @@ async function previewStatus(page: Page, status: unknown) {
 
 test.beforeEach(async ({ page }) => {
   await mockAPI(page);
+  // Do not proxy missing decorative assets to a developer's running Hister.
+  await page.route('**/static/**', (route) => route.fulfill({ status: 204 }));
   await page.clock.install();
 });
 
@@ -309,6 +311,74 @@ test('missing, retired and absent files are not ready or queued', async ({ page 
   await page.reload();
   await expect(article).toContainText('No download is queued.');
   await expect(article.getByRole('link')).toHaveCount(0);
+});
+
+test('manual status checks visibly report progress, unchanged results, and errors', async ({
+  page,
+}) => {
+  const empty: MediaStatus = {
+    document_id: 'document-1',
+    available: [],
+    active: false,
+    attempt: null,
+  };
+  await previewStatus(page, empty);
+  let reads = 0;
+  let fail = false;
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route('**/api/yt_downloader/status?**', async (route) => {
+    reads++;
+    if (reads === 1) await pending;
+    if (fail) await route.fulfill({ status: 503, body: 'unavailable' });
+    else await route.fulfill({ json: empty });
+  });
+  await page.goto(previewPath(sourceURL));
+  const article = page.getByRole('article', { name: 'Downloaded media' });
+  const check = article.getByRole('button', { name: /Check(?:ing)? status/ });
+  await check.click();
+  await expect(check).toHaveText('Checking status…');
+  await expect(check).toBeDisabled();
+  await expect(article.getByRole('button', { name: 'Download video and audio' })).toBeDisabled();
+  await check.click({ force: true });
+  expect(reads).toBe(1);
+  release();
+  await expect(article.getByRole('status')).toHaveText(
+    'Status checked. Details are available below.',
+  );
+  const details = article.getByText('Status checked — view details');
+  await expect(details).toBeVisible();
+  await expect(article.getByText('No saved media is registered.')).toBeHidden();
+  await details.focus();
+  await page.keyboard.press('Enter');
+  await expect(article.getByText('No saved media is registered.')).toBeVisible();
+  await expect(article.getByText('No download attempt has been recorded.')).toBeVisible();
+  await expect(article.getByText('Download active: No')).toBeVisible();
+  await expect(article.locator('time')).toHaveAttribute('datetime', /.+/);
+  await expect(article).toContainText('No download is queued.');
+  await expect(check).toBeEnabled();
+
+  fail = true;
+  await check.click();
+  await expect(article.getByRole('alert')).toContainText('Could not verify current status');
+  await expect(details).toHaveCount(0);
+  await expect(article).toContainText('No download is queued.');
+});
+
+test('status details show the checked saved media and latest attempt', async ({ page }) => {
+  await previewStatus(page, ready);
+  await page.route('**/api/yt_downloader/status?**', (route) => route.fulfill({ json: ready }));
+  await page.goto(previewPath(sourceURL));
+  const article = page.getByRole('article', { name: 'Downloaded media' });
+  await article.getByRole('button', { name: 'Check status' }).click();
+  await article.getByText('Status checked — view details').click();
+  await expect(article.getByText('Saved video: ready')).toBeVisible();
+  await expect(article.getByText('Saved audio: ready')).toBeVisible();
+  await expect(article.getByText('Latest attempt: ready')).toBeVisible();
+  await expect(article.getByText('Video: Completed')).toBeVisible();
+  await expect(article.getByText('Audio: Completed')).toBeVisible();
 });
 
 test('failed checks back off, preserve last confirmed state, and can be retried', async ({

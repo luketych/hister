@@ -15,7 +15,10 @@
   let error = $state('');
   let polling = $state(false);
   let submitting = $state(false);
-  let refreshStatus: () => void = () => {};
+  let checking = $state(false);
+  let checkedStatus = $state<MediaStatus | null>(null);
+  let checkedAt = $state('');
+  let refreshStatus: (manual?: boolean) => void = () => {};
   let canRetry = $derived(
     Boolean(
       status.attempt && ['failed', 'cancelled', 'interrupted'].includes(status.attempt.state),
@@ -24,9 +27,11 @@
   let hasReadyMedia = $derived(status.available.some((artifact) => artifact.state === 'ready'));
 
   async function requestDownload() {
-    if (submitting || !status.document_id) return;
+    if (submitting || checking || !status.document_id) return;
     submitting = true;
     error = '';
+    checkedStatus = null;
+    checkedAt = '';
     try {
       const retry =
         status.attempt && ['failed', 'cancelled', 'interrupted'].includes(status.attempt.state);
@@ -54,6 +59,9 @@
     status = initial;
     error = '';
     polling = initial.active;
+    checking = false;
+    checkedStatus = null;
+    checkedAt = '';
     let current = initial;
     let disposed = false;
     let busy = false;
@@ -72,10 +80,15 @@
       timer = setTimeout(refresh, delay);
     }
 
-    async function refresh() {
+    async function refresh(manual = false) {
       if (disposed || busy) return;
       clearTimeout(timer);
       busy = true;
+      checking = true;
+      if (manual) {
+        checkedStatus = null;
+        checkedAt = '';
+      }
       let delay = 1000;
       try {
         const response = await apiFetch(
@@ -90,23 +103,30 @@
         status = next;
         polling = next.active;
         error = '';
+        if (manual) {
+          checkedStatus = next;
+          checkedAt = new Date().toISOString();
+        }
         failures = 0;
       } catch {
         if (disposed) return;
         failures++;
+        checkedStatus = null;
+        checkedAt = '';
         error = 'Could not verify current status. Last confirmed state is shown.';
         delay = Math.min(30000, 1000 * 2 ** failures);
       } finally {
         busy = false;
+        if (!disposed) checking = false;
         if (failures < 5) schedule(delay);
         else polling = false;
       }
     }
 
-    refreshStatus = () => {
+    refreshStatus = (manual = false) => {
       deadline = Date.now() + 30 * 60 * 1000;
       failures = 0;
-      void refresh();
+      void refresh(manual);
     };
     // Immediate first read closes the window between the preview snapshot and
     // mounting. Subsequent requests are bounded, non-overlapping and active-only.
@@ -172,8 +192,8 @@
     {/if}
     {#if !status.unavailable && !status.active && (canRetry || !hasReadyMedia)}
       <button
-        class="text-hister-teal cursor-pointer text-sm underline disabled:cursor-wait"
-        disabled={submitting}
+        class="text-hister-teal mr-4 cursor-pointer text-sm underline disabled:cursor-wait"
+        disabled={submitting || checking}
         onclick={requestDownload}
       >
         {submitting
@@ -189,7 +209,48 @@
       </p>
     {/if}
   {/if}
-  <button class="text-hister-teal cursor-pointer text-sm underline" onclick={() => refreshStatus()}>
-    Check status
+  <button
+    class="text-hister-teal cursor-pointer text-sm underline disabled:cursor-wait"
+    disabled={checking || submitting}
+    onclick={() => refreshStatus(true)}
+  >
+    {checking ? 'Checking status…' : 'Check status'}
   </button>
+  {#if checkedStatus && !error}
+    <p role="status" class="sr-only">Status checked. Details are available below.</p>
+    <details class="text-text-brand-muted text-sm">
+      <summary class="text-hister-teal cursor-pointer underline"
+        >Status checked — view details</summary
+      >
+      <div class="mt-2 space-y-1">
+        <p>Checked: <time datetime={checkedAt}>{new Date(checkedAt).toLocaleString()}</time></p>
+        {#if checkedStatus.unavailable}
+          <p>Media status is unavailable while an ownership change is unresolved.</p>
+        {:else}
+          <p>Download active: {checkedStatus.active ? 'Yes' : 'No'}</p>
+          {#if checkedStatus.available.length}
+            {#each checkedStatus.available as artifact (artifact.id)}
+              <p>Saved {artifact.role}: {artifact.state}</p>
+            {/each}
+          {:else}
+            <p>No saved media is registered.</p>
+          {/if}
+          {#if checkedStatus.attempt}
+            <p>Latest attempt: {checkedStatus.attempt.state}</p>
+            <p>
+              Video: {modeLabel(checkedStatus.attempt.video, checkedStatus.attempt.state, 'video')}
+            </p>
+            <p>
+              Audio: {modeLabel(checkedStatus.attempt.audio, checkedStatus.attempt.state, 'audio')}
+            </p>
+            {#if failureMessage(checkedStatus.attempt.error_code)}
+              <p>{failureMessage(checkedStatus.attempt.error_code)}</p>
+            {/if}
+          {:else}
+            <p>No download attempt has been recorded.</p>
+          {/if}
+        {/if}
+      </div>
+    </details>
+  {/if}
 </article>
